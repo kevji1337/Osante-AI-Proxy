@@ -6,12 +6,6 @@ import { t } from '../utils/i18n.js';
 class Stats {
     constructor() {
         this.container = document.getElementById('view-container');
-        // 监听语言切换
-        window.addEventListener('languageChanged', () => {
-            if (state.get('currentView') === 'stats') {
-                this.render();
-            }
-        });
     }
 
     async render() {

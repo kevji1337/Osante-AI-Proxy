@@ -4,31 +4,26 @@ Guidance for Claude Code when working in this repository.
 
 ## Project overview
 
-**Osante Proxy** is a smart API endpoint rotation proxy designed for Claude Code and Codex CLI.
+**Osante Proxy** — personal open-source fork of upstream [ccNexus](https://github.com/lich0821/ccNexus), stripped down to the server mode and tailored for a single-user local setup.
 
-**Core features:**
+Core features:
+
 - Multi-endpoint rotation with automatic failover
-- API format conversion (Claude ↔ OpenAI ↔ Gemini)
-- Token Pool management (automatic rotation, refresh, failure isolation)
-- Real-time stats and monitoring
-- WebDAV cloud sync (desktop only)
-- Web UI on `/ui/` (English only, no auth)
+- Token Pool only (single `api_key` mode removed from the UI; legacy endpoints auto-migrate on startup)
+- HTTP 402 "usage limit reached" failover — token-level cooldown inside the pool, endpoint-level cooldown only when no pool is in play
+- API format conversion (Claude / OpenAI / OpenAI-Responses / Gemini)
+- English-only web UI, no auth (loopback only by design)
+- In-memory log ring exposed at `/api/logs` + Logs tab in the UI
 
-**Two run modes:**
-- **Server mode** (active): headless HTTP API proxy (`cmd/server/`)
-- **Desktop mode** (Wails v2 GUI, `cmd/desktop/`) — not the focus of current work
+The headless server lives in `cmd/server/`. There is no desktop build in this fork (the upstream Wails app was removed).
 
 ## Common dev commands
 
 ### Build / run
 
 ```bash
-# Build the server
-cd cmd/server && go build -ldflags="-s -w" -o osante-proxy.exe .
-
-# Run
-cd cmd/server && go run main.go
-# or the built binary:
+cd cmd/server
+go build -ldflags="-s -w" -o osante-proxy.exe .
 ./osante-proxy.exe
 ```
 
@@ -57,74 +52,38 @@ go mod tidy
 
 ## Architecture
 
-### Directory layout
-
 ```
-Osante-AI-Proxy/
-├── cmd/
-│   ├── desktop/          # Wails desktop app (not actively maintained here)
-│   └── server/           # Headless HTTP server (active)
-│       ├── main.go
-│       └── webui/        # Embedded web admin (Go + vanilla JS)
-└── internal/
-    ├── proxy/            # HTTP proxy core + failover + token pool rotation
-    ├── transformer/      # API format converters
-    ├── storage/          # SQLite-backed persistence
-    ├── config/           # Configuration
-    ├── webdav/           # WebDAV sync (desktop)
-    └── logger/           # Logging with in-memory ring buffer (exposed via /api/logs)
+cmd/server/         headless HTTP server entry + webui (embedded vanilla-JS admin)
+internal/
+  proxy/            HTTP proxy core, failover loop, token-pool rotation, usage-limit handling
+  transformer/      Claude ↔ OpenAI ↔ Gemini conversion (streaming + non-streaming)
+  storage/          SQLite (WAL) persistence: endpoints, credentials, stats, app config
+  config/           configuration types + storage adapter
+  logger/           leveled logging with an in-memory ring buffer (1000 entries)
+  session/          per-session context helpers
+  terminal/         terminal feature detection (used by streaming output)
+  tokencount/       token counting helpers
 ```
 
 ### Key components
 
-**Proxy** (`internal/proxy/proxy.go`)
-- Manages multiple endpoints, automatic failover.
-- Tracks current endpoint, active requests, per-endpoint runtime state (cooldown, last error).
-- Pool-aware request loop in `proxy_request.go` retries either on the same endpoint (token pool exhaustion) or the next endpoint (whole endpoint cooldown).
+- **Proxy** (`internal/proxy/proxy.go`, `proxy_request.go`) — manages endpoints, tracks current endpoint and per-endpoint runtime state. The request loop retries either on the same endpoint (token pool exhaustion) or the next endpoint (whole-endpoint cooldown).
+- **Usage-limit handling** (`internal/proxy/usage_limit.go`, `proxy_request.go::handlePaymentRequired`) — HTTP 402 + body containing "usage limit" puts a token (in token-pool mode) or the endpoint (otherwise) into cooldown. Reset time is parsed from the body (UTC+8-aware), default fallback 5 hours.
+- **Storage** (`internal/storage/sqlite.go`) — SQLite in WAL mode. Stores endpoints, credentials (token pool), usage stats, and app config.
 
-**Usage-limit handling** (`internal/proxy/usage_limit.go`, `proxy_request.go::handlePaymentRequired`)
-- HTTP 402 + body containing "usage limit" puts:
-  - the **token** into cooldown when the endpoint is in token-pool mode (retry on same endpoint, next token);
-  - the **endpoint** into cooldown otherwise (retry on next endpoint).
-- Cooldown until reset time parsed from the body (UTC+8 aware), or default 5 hours.
+### Key paths
 
-**Transformer** (`internal/transformer/`)
-- Converts between Claude, OpenAI (Chat + Response), Gemini.
-- Supports streaming/SSE.
-
-**Storage** (`internal/storage/sqlite.go`)
-- SQLite in WAL mode.
-- Stores endpoints, credentials (token pool), usage stats, app config.
-
-### Key file paths
-
-- Database: `~/.Osante/osante.db` (legacy installs: `~/.ccNexus/ccnexus.db` — auto-fallback for backwards compat)
-- Auth modes: `internal/config/config.go` (token_pool is the only mode the server build exposes)
-- Proxy routes: `internal/proxy/proxy.go::Start` (`/`, `/v1/messages/count_tokens`, `/v1/models`, `/health`, `/stats`)
-
-## Endpoint configuration
-
-### Auth mode
-
-The server build supports only `token_pool`. The Web UI no longer exposes
-the auth-mode selector; new endpoints are created in token-pool mode, and any
-legacy `api_key` endpoint is migrated on startup (the existing apiKey becomes
-the first token of the pool).
-
-### Transformer types
-
-- `claude` — Claude API
-- `openai` — OpenAI Chat API
-- `openai2` — OpenAI Response API
-- `gemini` — Google Gemini API
+- Database: `~/.Osante/osante.db`
+- Default port: `52710` (legacy `3000` configs auto-migrate)
+- Auth modes: `token_pool` only — the UI doesn't expose any other
 
 ## API routes
 
 The proxy serves:
 
-- `/` — main proxy route (all upstream traffic)
+- `/` — main proxy route
 - `/v1/messages/count_tokens` — token counting
-- `/v1/models` — model list (cached)
+- `/v1/models` — cached model list
 - `/health` — health check
 - `/stats` — stats data
 
@@ -132,17 +91,16 @@ Web admin / JSON API routes are under `/api/...` and `/ui/`.
 
 ## Environment variables
 
-Server mode (preferred names; legacy `CCNEXUS_*` still works as fallback):
+| Var                | Default                       |
+|--------------------|-------------------------------|
+| `OSANTE_PORT`      | `52710`                       |
+| `OSANTE_DATA_DIR`  | `~/.Osante`                   |
+| `OSANTE_DB_PATH`   | `$OSANTE_DATA_DIR/osante.db`  |
+| `OSANTE_LOG_LEVEL` | `1` (INFO)                    |
 
-- `OSANTE_PORT` — override default port
-- `OSANTE_LOG_LEVEL` — log level
-- `OSANTE_DB_PATH` — SQLite db path
-- `OSANTE_DATA_DIR` — data dir (default `~/.Osante`)
-- `OSANTE_BASIC_AUTH_USERNAME` / `OSANTE_BASIC_AUTH_PASSWORD` — basic auth is currently disabled in the server build, kept for forward compat
+The admin API and the web UI are unauthenticated — BasicAuth has been removed completely.
 
 ## Dependencies
 
 - Go 1.24+
-- Wails v2 (desktop)
-- Node.js 18+ (desktop frontend)
-- SQLite (`modernc.org/sqlite`, pure Go)
+- SQLite via `modernc.org/sqlite` (pure Go)

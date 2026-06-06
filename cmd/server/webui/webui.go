@@ -5,10 +5,10 @@ import (
 	"io/fs"
 	"net/http"
 
+	"github.com/kevji1337/Osante-AI-Proxy/cmd/server/webui/api"
 	"github.com/kevji1337/Osante-AI-Proxy/internal/config"
 	"github.com/kevji1337/Osante-AI-Proxy/internal/proxy"
 	"github.com/kevji1337/Osante-AI-Proxy/internal/storage"
-	"github.com/kevji1337/Osante-AI-Proxy/cmd/server/webui/api"
 )
 
 //go:embed ui
@@ -28,25 +28,17 @@ func New(cfg *config.Config, p *proxy.Proxy, storage *storage.SQLiteStorage) *We
 	}
 }
 
-// RegisterRoutes registers all web UI routes to the provided mux
+// RegisterRoutes registers all web UI routes to the provided mux.
+// The admin API and the static UI are served open — there is no auth.
 func (w *WebUI) RegisterRoutes(mux *http.ServeMux) error {
 	mux.HandleFunc("/api/", w.apiHandler.ServeHTTP)
-
-	authConfig := api.AuthConfig{
-		// Basic Auth is permanently disabled — the web UI/API are open.
-		Enabled:  false,
-		Username: w.cfg.BasicAuthUsername,
-		Password: w.cfg.BasicAuthPassword,
-	}
-	authMiddleware := api.BasicAuthMiddleware(authConfig)
 
 	uiSubFS, err := fs.Sub(uiFS, "ui")
 	if err != nil {
 		return err
 	}
 
-	uiHandler := authMiddleware(http.FileServer(http.FS(uiSubFS)))
-	mux.Handle("/ui/", http.StripPrefix("/ui/", uiHandler))
+	mux.Handle("/ui/", http.StripPrefix("/ui/", http.FileServer(http.FS(uiSubFS))))
 
 	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui/", http.StatusFound)

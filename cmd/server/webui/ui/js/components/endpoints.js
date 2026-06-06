@@ -14,12 +14,6 @@ class Endpoints {
         this.draggedIndex = null;
         this.currentTokenPoolEndpoint = null;
         this.refreshTimer = null;
-        // 监听语言切换
-        window.addEventListener('languageChanged', () => {
-            if (state.get('currentView') === 'endpoints') {
-                this.render();
-            }
-        });
     }
 
     async render() {

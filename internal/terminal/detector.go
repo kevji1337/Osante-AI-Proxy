@@ -54,7 +54,7 @@ func detectWindowsTerminals() []TerminalInfo {
 		})
 	}
 
-	// Git Bash - 使用 git-bash.exe 而不是 bash.exe
+	// Git Bash — use git-bash.exe (not bash.exe).
 	gitBashPaths := []string{
 		filepath.Join(os.Getenv("ProgramFiles"), "Git", "git-bash.exe"),
 		filepath.Join(os.Getenv("ProgramFiles(x86)"), "Git", "git-bash.exe"),
@@ -77,7 +77,7 @@ func detectWindowsTerminals() []TerminalInfo {
 func detectMacTerminals() []TerminalInfo {
 	var terminals []TerminalInfo
 
-	// Terminal.app - 系统自带，始终可用
+	// Terminal.app — ships with macOS, always available.
 	terminals = append(terminals, TerminalInfo{
 		ID:   "terminal",
 		Name: "Terminal.app",
@@ -109,7 +109,7 @@ func detectMacTerminals() []TerminalInfo {
 			break
 		}
 	}
-	if len(terminals) == 2 { // 没找到 .app，尝试命令行
+	if len(terminals) == 2 { // no .app found, fall back to CLI binaries
 		if _, err := exec.LookPath("ghostty"); err == nil {
 			terminals = append(terminals, TerminalInfo{ID: "ghostty", Name: "Ghostty", Path: "ghostty"})
 		}

@@ -46,7 +46,7 @@ type Proxy struct {
 	ctxMu             sync.RWMutex                  // protects context maps
 	onEndpointSuccess func(endpointName string)     // callback when endpoint request succeeds
 	modelsCache       *ModelsCache                  // Cache for /v1/models endpoint
-	resolver          *EndpointResolver             // 端点解析器，用于解析客户端指定的端点
+	resolver          *EndpointResolver             // resolves the endpoint a client specifically targets
 	endpointStates    map[string]*endpointRuntimeState // per-endpoint runtime state (cooldown / last error)
 	stateMu           sync.RWMutex                  // protects endpointStates
 }

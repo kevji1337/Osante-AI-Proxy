@@ -1,123 +1,89 @@
-<div align="center">
+# Osante Proxy
 
-<p align="center">
-  <img src="docs/images/Osante Proxy.svg" alt="Claude Code & Codex CLI 智能端点轮换代理" width="720" />
-</p>
+A personal open-source fork of [ccNexus](https://github.com/lich0821/ccNexus), trimmed down and reworked for my own setup. Not affiliated with the upstream project — this is "the build I actually run", kept here so the bits I rely on don't drift.
 
-[![构建状态](https://github.com/lich0821/Osante Proxy/workflows/Build%20and%20Release/badge.svg)](https://github.com/lich0821/Osante Proxy/actions)
-[![许可证: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Go 版本](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go)](https://go.dev/)
-[![Wails](https://img.shields.io/badge/Wails-v2-blue)](https://wails.io/)
+A local HTTP proxy for **Claude Code** and **Codex CLI** that rotates a pool of API tokens, fails over on rate limits, and exposes a small web admin.
 
-[English](docs/README_EN.md) | [简体中文](README.md)
+## What's different from upstream
 
-</div>
+- **Token Pool is the only auth mode.** The single-key `api_key` mode is gone from the UI. Legacy endpoints auto-migrate to a pool on first start (the existing key becomes the first token).
+- **Usage-limit failover.** When an upstream returns `HTTP 402 "Usage limit reached"`, the offending token is put on cooldown (parsed from the reset time, fallback 5h) and the same request is retried on the next token without the client seeing a failure. Whole-endpoint cooldown only kicks in when no pool is in play.
+- **English-only web UI.** Chinese locale, language switcher, and Basic Auth have all been removed. The admin API is open on loopback by design.
+- **Logs tab.** The in-memory log ring buffer is exposed via `GET /api/logs` and rendered as a live tail in the web UI.
+- **Per-token Test button + live cooldown countdown** inside the Token Pool modal.
+- **Default port `52710`** instead of `3000` (old `3000` configs are auto-migrated on first launch).
+- **Quieter logs.** Generic gateway 404s and tool-call cleanup failures on empty bodies are demoted to `DEBUG`.
 
-## 功能特性
+## Quick start
 
-- **多端点轮换**：自动故障转移，一个失败自动切换下一个
-- **API 格式转换**：支持 Claude、OpenAI、Gemini 格式互转
-- **Codex Token Pool**：支持批量导入 `access_token/refresh_token`，自动轮换、自动刷新、失效隔离与状态管理
-- **Token Pool 使用统计**：单条凭证请求/错误/Token 统计，支持快捷查看
-- **模型列表 API**：提供 `/v1/models`，支持缓存与按需刷新
-- **服务端鉴权**：headless/server 模式支持 Basic Auth
-- **实时统计**：事件驱动的零延迟统计更新，支持今日/昨日/本周/本月四周期快速切换
-- **端点筛选**：按类型、可用性、启用状态多选筛选，快速定位端点
-- **端点克隆**：一键复制现有端点配置，快速创建相似端点
-- **WebDAV 同步**：多设备间同步配置和数据
-- **跨平台**：Windows、macOS、Linux
-- **[Docker](docs/README_DOCKER.md)**：纯后端 HTTP 服务，并提供容器化运行
+### Build
 
-<table>
-  <tr>
-    <td align="center"><img src="docs/images/CN-Light.png" alt="明亮主题" width="400"></td>
-    <td align="center"><img src="docs/images/CN-Dark.png" alt="暗黑主题" width="400"></td>
-  </tr>
-</table>
-
-## 快速开始
-
-### 1. 下载安装
-
-[下载最新版本](https://github.com/lich0821/Osante Proxy/releases/latest)
-
-- **Windows**: 解压后运行 `Osante Proxy.exe`
-- **macOS**: 移动到「应用程序」，首次运行右键点击 → 打开
-- **Linux**: `tar -xzf Osante Proxy-linux-amd64.tar.gz && ./Osante Proxy`
-
-### 2. 添加端点
-
-点击「添加端点」，填写 API 地址、密钥，选择转换器（Claude / OpenAI Chat / OpenAI Responses / Gemini）。
-
-- 如果端点填写了模型，会覆盖客户端请求里的模型
-- 如果端点不填写模型，则透传客户端原请求模型
-
-如需使用 Codex Token Pool：
-- 认证方式选择 `Codex Token Pool`
-- 在 Token Pool 页面导入一批 token JSON（支持 `access_token` + `refresh_token`）
-- 系统会自动进行 token 轮换、401 后刷新与状态管理（active/expiring/need_refresh/invalid 等）
-
-### 3. 配置 CC
-
-#### Claude Code
-`~/.claude/settings.json`
-```json
-{
-  "env": {
-    "ANTHROPIC_AUTH_TOKEN": "随便写，不重要",
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:3000",
-    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000", // 有些模型可能不支持 64k
-  }
-  // 其他配置
-}
-
+```bash
+cd cmd/server
+go build -ldflags="-s -w" -o osante-proxy.exe .
 ```
 
-#### Codex CLI
-只需要配置 `~/.codex/config.toml`：
+Requires Go 1.24+.
+
+### Run
+
+```bash
+./osante-proxy.exe
+```
+
+Listens on `127.0.0.1:52710` by default. Data dir: `~/.Osante/`, db: `~/.Osante/osante.db`.
+
+### Web admin
+
+Open <http://127.0.0.1:52710/ui/>.
+
+1. Add an endpoint (URL + transformer + model).
+2. Click **Token Pool** on the endpoint row and paste tokens either as JSON or one per row via the simple form.
+3. Done. Requests rotate through the pool LRU-style; tokens that hit usage limits sit out their cooldown automatically.
+
+### Wire up Claude Code
+
+```
+ANTHROPIC_BASE_URL=http://127.0.0.1:52710
+ANTHROPIC_AUTH_TOKEN=anything
+```
+
+A ready-made launcher script is at `C:\tweaks\osante.bat`.
+
+### Wire up Codex CLI
+
+`~/.codex/config.toml`:
+
 ```toml
-model_provider = "Osante Proxy"
+model_provider = "osante"
 model = "gpt-5-codex"
 preferred_auth_method = "apikey"
 
-[model_providers.Osante Proxy]
+[model_providers.osante]
 name = "Osante Proxy"
-base_url = "http://localhost:3000/v1"
-wire_api = "responses"  # 或 "chat"
-
-# 其他配置
+base_url = "http://127.0.0.1:52710/v1"
+wire_api = "responses"
 ```
 
-`~/.codex/auth.json` 可以忽略了。
+## Environment variables
 
-## 运行提示
+| Var                 | Default               | Notes                             |
+|---------------------|-----------------------|-----------------------------------|
+| `OSANTE_PORT`       | `52710`               | Listen port                       |
+| `OSANTE_DATA_DIR`   | `~/.Osante`           | Data directory                    |
+| `OSANTE_DB_PATH`    | `$OSANTE_DATA_DIR/osante.db` | SQLite db path             |
+| `OSANTE_LOG_LEVEL`  | `1` (INFO)            | `0` DEBUG / `1` INFO / `2` WARN / `3` ERROR |
 
-- `Osante Proxy` 默认监听 `3000` 端口，可通过 CLI 参数 `-port` 或环境变量 `OSANTE_PORT` 覆盖。
-- 如果启用了 Basic Auth，首次启动且未设置密码时会自动生成随机密码并打印到日志。
-- `/v1/models` 默认走缓存；如需强制刷新，可使用启用的 refresh 参数能力。
-- headless 模式下建议仅在可信内网使用，或通过反向代理加 TLS 和访问控制。
+CLI `-port N` locks the port so it can't be changed via the API.
 
-## 获取帮助
+## Layout
 
-<table>
-  <tr>
-    <td align="center"><img src="https://gitee.com/hea7en/images/raw/master/group/chat.png" alt="微信群" width="200"></td>
-    <td align="center"><img src="cmd/desktop/frontend/public/WeChat.jpg" alt="公众号" width="200"></td>
-    <td align="center"><img src="cmd/desktop/frontend/public/ME.png" alt="个人微信" width="200"></td>
-  </tr>
-  <tr>
-    <td align="center">问题反馈请加群</td>
-    <td align="center">公众号</td>
-    <td align="center">群过期请加好友</td>
-  </tr>
-</table>
+```
+cmd/server/      headless HTTP server (active)
+cmd/desktop/     Wails desktop app (inherited from upstream, not maintained here)
+internal/       proxy core, transformers, storage, logger, config
+```
 
-## 文档
+## License
 
-- [详细配置](docs/configuration.md)
-- [开发指南](docs/development.md)
-- [常见问题](docs/FAQ.md)
-
-## 许可证
-
-[MIT](LICENSE)
+[MIT](LICENSE), same as upstream.

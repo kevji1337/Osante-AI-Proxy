@@ -7,12 +7,6 @@ import { t } from '../utils/i18n.js';
 class Dashboard {
     constructor() {
         this.container = document.getElementById('view-container');
-        // 监听语言切换
-        window.addEventListener('languageChanged', () => {
-            if (state.get('currentView') === 'dashboard') {
-                this.render();
-            }
-        });
     }
 
     async render() {

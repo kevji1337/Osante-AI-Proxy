@@ -16,26 +16,26 @@ func escapeSQLString(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
 }
 
-// safeConfigKeys 定义可以安全跨设备和跨平台备份/恢复的 app_config 配置项。
-// 这些配置是平台无关的，不包含设备特定或路径相关的值。
-// 不在此列表中的配置项（如 device_id、terminal_*、backup_local_dir、proxy_url 等）
-// 是设备/平台特定的，不应在不同设备间同步。
+// safeConfigKeys lists the app_config keys that are platform-agnostic and safe
+// to back up / restore across machines. Keys not in this list (device_id,
+// terminal_*, backup_local_dir, proxy_url, …) are host-specific and must not
+// be synced.
 var safeConfigKeys = []string{
-	// 应用设置
+	// Application settings
 	"port", "logLevel", "language",
-	// 主题设置
+	// Theme settings
 	"theme", "themeAuto", "autoLightTheme", "autoDarkTheme",
-	// 窗口关闭行为
+	// Window close behavior
 	"closeWindowBehavior",
-	// WebDAV 设置（URL 和凭证是通用的）
+	// WebDAV (URL + credentials are portable)
 	"webdav_url", "webdav_username", "webdav_password", "webdav_configPath", "webdav_statsPath",
-	// 备份提供商类型（不包括本地路径）
+	// Backup provider type (no local paths)
 	"backup_provider",
-	// S3 设置（云配置是通用的）
+	// S3 settings (cloud config is portable)
 	"backup_s3_endpoint", "backup_s3_region", "backup_s3_bucket", "backup_s3_prefix",
 	"backup_s3_accessKey", "backup_s3_secretKey", "backup_s3_sessionToken",
 	"backup_s3_useSSL", "backup_s3_forcePathStyle",
-	// 更新设置
+	// Update settings
 	"update_autoCheck", "update_checkInterval",
 }
 

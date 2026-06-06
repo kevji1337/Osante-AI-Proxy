@@ -158,12 +158,9 @@ type ProxyConfig struct {
 type Config struct {
 	Port                      int             `json:"port"`
 	PortLocked                bool            `json:"-"` // CLI forced port, cannot be changed via API
-	BasicAuthEnabled          bool            `json:"basicAuthEnabled"`
-	BasicAuthUsername         string          `json:"basicAuthUsername"`
-	BasicAuthPassword         string          `json:"basicAuthPassword"`
 	Endpoints                 []Endpoint      `json:"endpoints"`
 	LogLevel                  int             `json:"logLevel"`                            // 0=DEBUG, 1=INFO, 2=WARN, 3=ERROR
-	Language                  string          `json:"language"`                            // UI language: en, zh-CN
+	Language                  string          `json:"language"`                            // UI language: en
 	Theme                     string          `json:"theme"`                               // UI theme: light, dark
 	ThemeAuto                 bool            `json:"themeAuto"`                           // Auto switch theme based on time
 	AutoLightTheme            string          `json:"autoLightTheme,omitempty"`            // Theme to use in daytime when auto mode is on
@@ -188,15 +185,12 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Port:                      52710,
-		BasicAuthEnabled:          true,
-		BasicAuthUsername:         "admin",
-		BasicAuthPassword:         "",
-		LogLevel:                  1,       // Default to INFO level
-		Language:                  "zh-CN", // Default to Chinese
-		WindowWidth:               1024,    // Default window width
-		WindowHeight:              768,     // Default window height
-		ModelsCacheTTL:            30,      // Default 30 minutes
-		ModelsCacheRefreshEnabled: false,   // Default disabled
+		LogLevel:                  1,    // Default to INFO level
+		Language:                  "en", // English only
+		WindowWidth:               1024, // Default window width
+		WindowHeight:              768,  // Default window height
+		ModelsCacheTTL:            30,   // Default 30 minutes
+		ModelsCacheRefreshEnabled: false,
 		Endpoints: []Endpoint{
 			{
 				Name:        "Claude Official",
@@ -267,36 +261,6 @@ func (c *Config) GetLogLevel() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.LogLevel
-}
-
-// GetBasicAuthEnabled returns whether Basic Auth is enabled (thread-safe)
-func (c *Config) GetBasicAuthEnabled() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.BasicAuthEnabled
-}
-
-// GetBasicAuthUsername returns Basic Auth username (thread-safe)
-func (c *Config) GetBasicAuthUsername() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.BasicAuthUsername
-}
-
-// GetBasicAuthPassword returns Basic Auth password (thread-safe)
-func (c *Config) GetBasicAuthPassword() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.BasicAuthPassword
-}
-
-// UpdateBasicAuth updates Basic Auth configuration (thread-safe)
-func (c *Config) UpdateBasicAuth(enabled bool, username, password string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.BasicAuthEnabled = enabled
-	c.BasicAuthUsername = username
-	c.BasicAuthPassword = password
 }
 
 // UpdateEndpoints updates the endpoints (thread-safe)
@@ -805,17 +769,6 @@ func LoadFromStorage(storage StorageAdapter) (*Config, error) {
 		config.ClaudeNotificationType = "toast"
 	}
 
-	// Load Basic Auth config
-	if enabledStr, err := storage.GetConfig("basicAuthEnabled"); err == nil && enabledStr != "" {
-		config.BasicAuthEnabled = enabledStr == "true"
-	}
-	if username, err := storage.GetConfig("basicAuthUsername"); err == nil && username != "" {
-		config.BasicAuthUsername = username
-	}
-	if password, err := storage.GetConfig("basicAuthPassword"); err == nil && password != "" {
-		config.BasicAuthPassword = password
-	}
-
 	return config, nil
 }
 
@@ -1035,16 +988,6 @@ func (c *Config) SaveToStorage(storage StorageAdapter) error {
 	}
 	if err := storage.SetConfig("claude_notification_type", c.ClaudeNotificationType); err != nil {
 		return fmt.Errorf("failed to save claude_notification_type config: %w", err)
-	}
-
-	if err := storage.SetConfig("basicAuthEnabled", strconv.FormatBool(c.BasicAuthEnabled)); err != nil {
-		return fmt.Errorf("failed to save basicAuthEnabled config: %w", err)
-	}
-	if err := storage.SetConfig("basicAuthUsername", c.BasicAuthUsername); err != nil {
-		return fmt.Errorf("failed to save basicAuthUsername config: %w", err)
-	}
-	if err := storage.SetConfig("basicAuthPassword", c.BasicAuthPassword); err != nil {
-		return fmt.Errorf("failed to save basicAuthPassword config: %w", err)
 	}
 
 	return nil

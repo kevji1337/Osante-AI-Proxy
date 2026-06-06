@@ -9,12 +9,14 @@ import (
 	"github.com/kevji1337/Osante-AI-Proxy/internal/storage"
 )
 
-// Handler handles API requests
+// Handler handles API requests.
+//
+// The admin API is unauthenticated by design: this is a local-loopback proxy
+// for a single user, the BasicAuth flow has been removed entirely.
 type Handler struct {
 	config  *config.Config
 	proxy   *proxy.Proxy
 	storage *storage.SQLiteStorage
-	auth    AuthConfig
 }
 
 // NewHandler creates a new API handler
@@ -23,12 +25,6 @@ func NewHandler(cfg *config.Config, p *proxy.Proxy, s *storage.SQLiteStorage) *H
 		config:  cfg,
 		proxy:   p,
 		storage: s,
-		auth: AuthConfig{
-			// Basic Auth is permanently disabled — the web UI/API are open.
-			Enabled:  false,
-			Username: cfg.BasicAuthUsername,
-			Password: cfg.BasicAuthPassword,
-		},
 	}
 }
 
@@ -39,46 +35,40 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		path = "/" + path
 	}
 
-	authMiddleware := BasicAuthMiddleware(h.auth)
-
 	switch path {
 	case "/api/endpoints":
-		authMiddleware(http.HandlerFunc(h.handleEndpoints)).ServeHTTP(w, r)
+		h.handleEndpoints(w, r)
 	case "/api/endpoints/current":
-		authMiddleware(http.HandlerFunc(h.handleCurrentEndpoint)).ServeHTTP(w, r)
+		h.handleCurrentEndpoint(w, r)
 	case "/api/endpoints/switch":
-		authMiddleware(http.HandlerFunc(h.handleSwitchEndpoint)).ServeHTTP(w, r)
+		h.handleSwitchEndpoint(w, r)
 	case "/api/endpoints/reorder":
-		authMiddleware(http.HandlerFunc(h.handleReorderEndpoints)).ServeHTTP(w, r)
+		h.handleReorderEndpoints(w, r)
 	case "/api/endpoints/fetch-models":
-		authMiddleware(http.HandlerFunc(h.handleFetchModels)).ServeHTTP(w, r)
+		h.handleFetchModels(w, r)
 	case "/api/stats/summary":
-		authMiddleware(http.HandlerFunc(h.handleStatsSummary)).ServeHTTP(w, r)
+		h.handleStatsSummary(w, r)
 	case "/api/stats/daily":
-		authMiddleware(http.HandlerFunc(h.handleStatsDaily)).ServeHTTP(w, r)
+		h.handleStatsDaily(w, r)
 	case "/api/stats/weekly":
-		authMiddleware(http.HandlerFunc(h.handleStatsWeekly)).ServeHTTP(w, r)
+		h.handleStatsWeekly(w, r)
 	case "/api/stats/monthly":
-		authMiddleware(http.HandlerFunc(h.handleStatsMonthly)).ServeHTTP(w, r)
+		h.handleStatsMonthly(w, r)
 	case "/api/stats/trends":
-		authMiddleware(http.HandlerFunc(h.handleStatsTrends)).ServeHTTP(w, r)
+		h.handleStatsTrends(w, r)
 	case "/api/config":
-		authMiddleware(http.HandlerFunc(h.handleConfig)).ServeHTTP(w, r)
+		h.handleConfig(w, r)
 	case "/api/config/port":
-		authMiddleware(http.HandlerFunc(h.handleConfigPort)).ServeHTTP(w, r)
+		h.handleConfigPort(w, r)
 	case "/api/config/log-level":
-		authMiddleware(http.HandlerFunc(h.handleConfigLogLevel)).ServeHTTP(w, r)
-	case "/api/config/basic-auth":
-		authMiddleware(http.HandlerFunc(h.handleBasicAuthConfig)).ServeHTTP(w, r)
-	case "/api/config/basic-auth/reset-password":
-		authMiddleware(http.HandlerFunc(h.handleResetBasicAuthPassword)).ServeHTTP(w, r)
+		h.handleConfigLogLevel(w, r)
 	case "/api/events":
-		authMiddleware(http.HandlerFunc(h.handleEvents)).ServeHTTP(w, r)
+		h.handleEvents(w, r)
 	case "/api/logs":
-		authMiddleware(http.HandlerFunc(h.handleLogs)).ServeHTTP(w, r)
+		h.handleLogs(w, r)
 	default:
 		if strings.HasPrefix(path, "/api/endpoints/") {
-			authMiddleware(http.HandlerFunc(h.handleEndpointByName)).ServeHTTP(w, r)
+			h.handleEndpointByName(w, r)
 			return
 		}
 		http.NotFound(w, r)

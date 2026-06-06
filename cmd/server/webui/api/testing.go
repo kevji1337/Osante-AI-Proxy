@@ -87,7 +87,7 @@ func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey stri
 			"messages": []map[string]interface{}{
 				{
 					"role":    "user",
-					"content": "你是什么模型?",
+					"content": "What model are you?",
 				},
 			},
 			"max_tokens": 16,
@@ -103,7 +103,7 @@ func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey stri
 			"messages": []map[string]interface{}{
 				{
 					"role":    "user",
-					"content": "你是什么模型?",
+					"content": "What model are you?",
 				},
 			},
 			"max_tokens": 16,
@@ -119,7 +119,7 @@ func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey stri
 				{
 					"parts": []map[string]interface{}{
 						{
-							"text": "你是什么模型?",
+							"text": "What model are you?",
 						},
 					},
 				},

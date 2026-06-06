@@ -28,7 +28,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	dbPath := envWithLegacy("OSANTE_DB_PATH", "CCNEXUS_DB_PATH")
+	dbPath := os.Getenv("OSANTE_DB_PATH")
 	if dbPath == "" {
 		dbPath = filepath.Join(dataDir, "osante.db")
 	}
@@ -117,33 +117,13 @@ func main() {
 }
 
 func resolveDataDir() string {
-	if dir := envWithLegacy("OSANTE_DATA_DIR", "CCNEXUS_DATA_DIR"); dir != "" {
+	if dir := os.Getenv("OSANTE_DATA_DIR"); dir != "" {
 		return dir
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		newDir := filepath.Join(home, ".Osante")
-		legacyDir := filepath.Join(home, ".ccNexus")
-		// Prefer the new dir. If only the legacy one exists, keep using it so
-		// existing installs don't lose their token pool on rename.
-		if _, err := os.Stat(newDir); err == nil {
-			return newDir
-		}
-		if _, err := os.Stat(legacyDir); err == nil {
-			return legacyDir
-		}
-		return newDir
+		return filepath.Join(home, ".Osante")
 	}
 	return "/data"
-}
-
-// envWithLegacy returns the value of the primary env var when set, otherwise
-// falls back to the legacy one. Used during the ccNexus → Osante rename so the
-// old CCNEXUS_* variables keep working until users migrate their scripts.
-func envWithLegacy(primary, legacy string) string {
-	if v := os.Getenv(primary); v != "" {
-		return v
-	}
-	return os.Getenv(legacy)
 }
 
 func loadConfig(sqliteStorage *storage.SQLiteStorage) (*config.Config, error) {
@@ -180,7 +160,7 @@ func loadConfig(sqliteStorage *storage.SQLiteStorage) (*config.Config, error) {
 }
 
 func applyEnvOverrides(cfg *config.Config) {
-	if portStr := envWithLegacy("OSANTE_PORT", "CCNEXUS_PORT"); portStr != "" {
+	if portStr := os.Getenv("OSANTE_PORT"); portStr != "" {
 		if port, err := strconv.Atoi(portStr); err == nil {
 			cfg.UpdatePort(port)
 		} else {
@@ -188,16 +168,12 @@ func applyEnvOverrides(cfg *config.Config) {
 		}
 	}
 
-	if levelStr := envWithLegacy("OSANTE_LOG_LEVEL", "CCNEXUS_LOG_LEVEL"); levelStr != "" {
+	if levelStr := os.Getenv("OSANTE_LOG_LEVEL"); levelStr != "" {
 		if level, err := strconv.Atoi(levelStr); err == nil {
 			cfg.UpdateLogLevel(level)
 		} else {
 			logger.Warn("Invalid OSANTE_LOG_LEVEL value %q: %v", levelStr, err)
 		}
-	}
-
-	if username := envWithLegacy("OSANTE_BASIC_AUTH_USERNAME", "CCNEXUS_BASIC_AUTH_USERNAME"); username != "" {
-		cfg.BasicAuthUsername = username
 	}
 }
 

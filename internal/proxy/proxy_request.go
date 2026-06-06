@@ -159,7 +159,7 @@ func (p *Proxy) newProxyRequestContext(w http.ResponseWriter, r *http.Request) (
 
 	useSpecificEndpoint := specifiedEndpoint != nil
 	if useSpecificEndpoint {
-		logger.Debug("[Resolver] 使用指定端点: %s", specifiedEndpoint.Name)
+		logger.Debug("[Resolver] using specified endpoint: %s", specifiedEndpoint.Name)
 	}
 
 	return &proxyRequestContext{
@@ -233,7 +233,7 @@ func (p *Proxy) prepareEndpointAttempt(reqCtx *proxyRequestContext, attempt *end
 
 	if reqCtx.modelOverride != "" {
 		transformedBody = overrideModelInPayload(transformedBody, reqCtx.modelOverride)
-		logger.DebugLog("[%s] 应用模型覆盖后的请求: %s", attempt.endpoint.Name, string(transformedBody))
+		logger.DebugLog("[%s] request after model override: %s", attempt.endpoint.Name, string(transformedBody))
 	}
 
 	cleanedBody, err := cleanIncompleteToolCalls(transformedBody)
@@ -554,11 +554,11 @@ func (p *Proxy) tryRefreshAfterAuthFailure(reqCtx *proxyRequestContext, attempt 
 
 func resolveAttemptModelName(reqCtx *proxyRequestContext, endpoint config.Endpoint) string {
 	if strings.TrimSpace(endpoint.Model) != "" {
-		logger.Debug("[%s] 使用端点模型: %s", endpoint.Name, endpoint.Model)
+		logger.Debug("[%s] using endpoint model: %s", endpoint.Name, endpoint.Model)
 		return strings.TrimSpace(endpoint.Model)
 	}
 	if reqCtx.modelOverride != "" {
-		logger.Debug("[%s] 使用模型覆盖值: %s", endpoint.Name, reqCtx.modelOverride)
+		logger.Debug("[%s] using model override: %s", endpoint.Name, reqCtx.modelOverride)
 		return reqCtx.modelOverride
 	}
 	return reqCtx.requestModel

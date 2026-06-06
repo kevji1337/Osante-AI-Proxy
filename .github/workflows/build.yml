@@ -4,9 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-  pull_request:
-    branches:
-      - master
   workflow_dispatch:
 
 permissions:
@@ -14,190 +11,73 @@ permissions:
 
 jobs:
   build:
+    name: Build ${{ matrix.platform }}/${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             platform: linux
             arch: amd64
+            ext: ''
           - os: macos-latest
             platform: darwin
             arch: amd64
+            ext: ''
           - os: macos-latest
             platform: darwin
             arch: arm64
+            ext: ''
           - os: windows-latest
             platform: windows
             arch: amd64
-          - os: windows-latest
-            platform: windows
-            arch: arm64
-
-    runs-on: ${{ matrix.os }}
+            ext: '.exe'
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
-          go-version: '1.24.3'
-          cache: true
+          go-version: '1.24'
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
-      - name: Install npm dependencies
-        run: |
-          cd cmd/desktop/frontend
-          npm ci
+      - name: Build
         shell: bash
-
-      - name: Cache Wails CLI
-        id: cache-wails
-        uses: actions/cache@v4
-        with:
-          path: ~/go/bin/wails
-          key: ${{ runner.os }}-wails-v2.11.0
-
-      - name: Get version
-        id: get_version
-        run: |
-          if [ "${{ github.ref_type }}" == "tag" ]; then
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          else
-            echo "version=dev-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          fi
-        shell: bash
-
-      - name: Install Wails (Linux)
-        if: matrix.platform == 'linux' && steps.cache-wails.outputs.cache-hit != 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
-          # Create webkit2gtk-4.0.pc symlink to webkit2gtk-4.1.pc in all pkg-config paths
-          for pcdir in $(pkg-config --variable pc_path pkg-config | tr ':' ' '); do
-            if [ -f "$pcdir/webkit2gtk-4.1.pc" ]; then
-              echo "Creating symlink in $pcdir"
-              sudo ln -sf "$pcdir/webkit2gtk-4.1.pc" "$pcdir/webkit2gtk-4.0.pc"
-            fi
-          done
-          # Verify the symlink was created
-          pkg-config --exists webkit2gtk-4.0 && echo "✓ webkit2gtk-4.0 found" || echo "✗ webkit2gtk-4.0 NOT found"
-          pkg-config --modversion webkit2gtk-4.0 || true
-          go install github.com/wailsapp/wails/v2/cmd/wails@latest
-
-      - name: Install Linux dependencies (cached)
-        if: matrix.platform == 'linux' && steps.cache-wails.outputs.cache-hit == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
-          # Create webkit2gtk-4.0.pc symlink to webkit2gtk-4.1.pc in all pkg-config paths
-          for pcdir in $(pkg-config --variable pc_path pkg-config | tr ':' ' '); do
-            if [ -f "$pcdir/webkit2gtk-4.1.pc" ]; then
-              echo "Creating symlink in $pcdir"
-              sudo ln -sf "$pcdir/webkit2gtk-4.1.pc" "$pcdir/webkit2gtk-4.0.pc"
-            fi
-          done
-          pkg-config --exists webkit2gtk-4.0 && echo "✓ webkit2gtk-4.0 found" || echo "✗ webkit2gtk-4.0 NOT found"
-
-      - name: Install Wails (macOS)
-        if: matrix.platform == 'darwin' && steps.cache-wails.outputs.cache-hit != 'true'
-        run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@latest
-
-      - name: Install Wails (Windows)
-        if: matrix.platform == 'windows' && steps.cache-wails.outputs.cache-hit != 'true'
-        run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@latest
-        shell: pwsh
-
-      - name: Build application (Linux/macOS)
-        if: matrix.platform != 'windows'
         env:
-          CGO_ENABLED: 1
+          GOOS: ${{ matrix.platform }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
         run: |
-          export PATH=$PATH:$(go env GOPATH)/bin
-          cd cmd/desktop
-          if [ "${{ matrix.platform }}" == "linux" ]; then
-            # Verify webkit2gtk-4.0 is available before building
-            echo "Checking WebKit2GTK availability..."
-            pkg-config --exists webkit2gtk-4.0 && echo "✓ webkit2gtk-4.0 is available" || echo "✗ webkit2gtk-4.0 NOT available"
-            pkg-config --modversion webkit2gtk-4.0 || true
+          mkdir -p dist
+          out="dist/osante-proxy-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.ext }}"
+          go build -ldflags="-s -w" -o "$out" ./cmd/server
+          ls -lh "$out"
 
-            export CGO_CFLAGS="$(pkg-config --cflags gtk+-3.0 webkit2gtk-4.0)"
-            export CGO_LDFLAGS="$(pkg-config --libs gtk+-3.0 webkit2gtk-4.0)"
-            export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig:${PKG_CONFIG_PATH}"
-
-            echo "CGO_CFLAGS: $CGO_CFLAGS"
-            echo "CGO_LDFLAGS: $CGO_LDFLAGS"
-          fi
-          wails build -platform ${{ matrix.platform }}/${{ matrix.arch }}
-
-      - name: Build application (Windows)
-        if: matrix.platform == 'windows'
-        run: |
-          $env:PATH += ";$(go env GOPATH)\bin"
-          cd cmd/desktop
-          wails build -platform ${{ matrix.platform }}/${{ matrix.arch }}
-        shell: pwsh
-
-      - name: Package application (Linux)
+      - name: Test
         if: matrix.platform == 'linux'
-        run: |
-          cd cmd/desktop/build/bin
-          tar -czf Osante Proxy-${{ steps.get_version.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz Osante Proxy
-          mv Osante Proxy-${{ steps.get_version.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz ../../../../
+        run: go test ./...
 
-      - name: Package application (macOS)
-        if: matrix.platform == 'darwin'
-        run: |
-          cd cmd/desktop/build/bin
-          if [ -d "Osante Proxy.app" ]; then
-            zip -r Osante Proxy-${{ steps.get_version.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}.zip "Osante Proxy.app"
-          else
-            tar -czf Osante Proxy-${{ steps.get_version.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz Osante Proxy
-          fi
-          mv Osante Proxy-${{ steps.get_version.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}.* ../../../../
-
-      - name: Package application (Windows)
-        if: matrix.platform == 'windows'
-        run: |
-          cd cmd/desktop/build/bin
-          Compress-Archive -Path Osante Proxy.exe -DestinationPath ../../../../Osante Proxy-${{ steps.get_version.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}.zip
-        shell: pwsh
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: Osante Proxy-${{ steps.get_version.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}
-          path: |
-            Osante Proxy-*.tar.gz
-            Osante Proxy-*.zip
+          name: osante-proxy-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/*
 
   release:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: dist
+          merge-multiple: true
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+      - name: List artifacts
+        run: ls -lh dist
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
-          draft: false
-          prerelease: false
+          files: dist/*
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_unmatched_files: true

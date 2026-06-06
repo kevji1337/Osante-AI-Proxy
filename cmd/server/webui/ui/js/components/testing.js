@@ -6,12 +6,6 @@ class Testing {
     constructor() {
         this.container = document.getElementById('view-container');
         this.endpoints = [];
-        // 监听语言切换
-        window.addEventListener('languageChanged', () => {
-            if (state.get('currentView') === 'testing') {
-                this.render();
-            }
-        });
     }
 
     async render() {
