@@ -1,0 +1,1051 @@
+package config
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"path"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+const (
+	AuthModeAPIKey         = "api_key"
+	AuthModeTokenPool      = "token_pool"
+	AuthModeCodexTokenPool = "codex_token_pool"
+
+	CodexTokenPoolAPIURL      = "https://chatgpt.com/backend-api/codex"
+	CodexTokenPoolTransformer = "openai2"
+)
+
+func NormalizeAuthMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case AuthModeTokenPool:
+		return AuthModeTokenPool
+	case AuthModeCodexTokenPool:
+		return AuthModeCodexTokenPool
+	default:
+		return AuthModeAPIKey
+	}
+}
+
+func IsTokenPoolAuthMode(mode string) bool {
+	normalized := NormalizeAuthMode(mode)
+	return normalized == AuthModeTokenPool || normalized == AuthModeCodexTokenPool
+}
+
+func ApplyEndpointAuthModeRules(ep *Endpoint) {
+	if ep == nil {
+		return
+	}
+
+	ep.AuthMode = NormalizeAuthMode(ep.AuthMode)
+	ep.APIUrl = strings.TrimSuffix(strings.TrimSpace(ep.APIUrl), "/")
+	ep.Transformer = strings.TrimSpace(ep.Transformer)
+
+	// Compatibility migration:
+	// legacy token_pool + openai2 + codex backend URL => codex_token_pool.
+	if ep.AuthMode == AuthModeTokenPool &&
+		strings.EqualFold(ep.Transformer, CodexTokenPoolTransformer) &&
+		isCodexBackendAPIURL(ep.APIUrl) {
+		ep.AuthMode = AuthModeCodexTokenPool
+	}
+
+	if ep.AuthMode == AuthModeCodexTokenPool {
+		ep.APIUrl = CodexTokenPoolAPIURL
+		ep.Transformer = CodexTokenPoolTransformer
+		ep.APIKey = ""
+		return
+	}
+
+	if ep.AuthMode == AuthModeTokenPool {
+		ep.APIKey = ""
+	}
+}
+
+func isCodexBackendAPIURL(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return false
+	}
+
+	normalized := trimmed
+	if !strings.HasPrefix(normalized, "http://") && !strings.HasPrefix(normalized, "https://") {
+		normalized = "https://" + normalized
+	}
+
+	parsed, err := url.Parse(normalized)
+	if err != nil || parsed == nil {
+		return strings.HasSuffix(strings.ToLower(strings.TrimSuffix(trimmed, "/")), "chatgpt.com/backend-api/codex")
+	}
+
+	host := strings.ToLower(strings.TrimSpace(parsed.Host))
+	cleanPath := path.Clean(strings.TrimSpace(parsed.Path))
+	if host != "chatgpt.com" {
+		return false
+	}
+	return strings.HasSuffix(cleanPath, "/backend-api/codex") || strings.HasSuffix(cleanPath, "/backend-api/codex/v1")
+}
+
+// Endpoint represents a single API endpoint configuration
+type Endpoint struct {
+	Name        string `json:"name"`
+	APIUrl      string `json:"apiUrl"`
+	APIKey      string `json:"apiKey"`
+	AuthMode    string `json:"authMode,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	Transformer string `json:"transformer,omitempty"` // Transformer type: claude, openai, gemini, deepseek
+	Model       string `json:"model,omitempty"`       // Target model name for non-Claude APIs
+	Remark      string `json:"remark,omitempty"`      // Optional remark for the endpoint
+}
+
+// WebDAVConfig represents WebDAV synchronization configuration
+type WebDAVConfig struct {
+	URL        string `json:"url"`        // WebDAV server URL
+	Username   string `json:"username"`   // Username
+	Password   string `json:"password"`   // Password
+	ConfigPath string `json:"configPath"` // Config backup path (default /Osante Proxy/config)
+	StatsPath  string `json:"statsPath"`  // Stats backup path (default /Osante Proxy/stats)
+}
+
+// LocalBackupConfig represents local backup configuration
+type LocalBackupConfig struct {
+	Dir string `json:"dir"` // Local directory to store backups
+}
+
+// S3BackupConfig represents S3-compatible backup configuration
+type S3BackupConfig struct {
+	Endpoint       string `json:"endpoint"`
+	Region         string `json:"region,omitempty"`
+	Bucket         string `json:"bucket"`
+	Prefix         string `json:"prefix,omitempty"`
+	AccessKey      string `json:"accessKey"`
+	SecretKey      string `json:"secretKey"`
+	SessionToken   string `json:"sessionToken,omitempty"`
+	UseSSL         bool   `json:"useSSL"`
+	ForcePathStyle bool   `json:"forcePathStyle"`
+}
+
+// BackupConfig represents backup/sync configuration across providers
+type BackupConfig struct {
+	Provider string             `json:"provider"` // webdav | local | s3
+	Local    *LocalBackupConfig `json:"local,omitempty"`
+	S3       *S3BackupConfig    `json:"s3,omitempty"`
+}
+
+// UpdateConfig represents update configuration
+type UpdateConfig struct {
+	AutoCheck      bool   `json:"autoCheck"`      // Auto check for updates
+	CheckInterval  int    `json:"checkInterval"`  // Check interval in hours
+	LastCheckTime  string `json:"lastCheckTime"`  // Last check time (RFC3339)
+	SkippedVersion string `json:"skippedVersion"` // Skipped version
+}
+
+// TerminalConfig represents terminal launcher configuration
+type TerminalConfig struct {
+	SelectedTerminal string   `json:"selectedTerminal"` // Selected terminal ID
+	ProjectDirs      []string `json:"projectDirs"`      // Project directories
+	ClaudeCommand    string   `json:"claudeCommand"`    // Custom launcher command, defaults to "claude"
+}
+
+// ProxyConfig represents HTTP proxy configuration
+type ProxyConfig struct {
+	URL string `json:"url"` // Proxy URL, e.g., http://127.0.0.1:7890 or socks5://127.0.0.1:1080
+}
+
+// Config represents the application configuration
+type Config struct {
+	Port                      int             `json:"port"`
+	PortLocked                bool            `json:"-"` // CLI forced port, cannot be changed via API
+	BasicAuthEnabled          bool            `json:"basicAuthEnabled"`
+	BasicAuthUsername         string          `json:"basicAuthUsername"`
+	BasicAuthPassword         string          `json:"basicAuthPassword"`
+	Endpoints                 []Endpoint      `json:"endpoints"`
+	LogLevel                  int             `json:"logLevel"`                            // 0=DEBUG, 1=INFO, 2=WARN, 3=ERROR
+	Language                  string          `json:"language"`                            // UI language: en, zh-CN
+	Theme                     string          `json:"theme"`                               // UI theme: light, dark
+	ThemeAuto                 bool            `json:"themeAuto"`                           // Auto switch theme based on time
+	AutoLightTheme            string          `json:"autoLightTheme,omitempty"`            // Theme to use in daytime when auto mode is on
+	AutoDarkTheme             string          `json:"autoDarkTheme,omitempty"`             // Theme to use in nighttime when auto mode is on
+	WindowWidth               int             `json:"windowWidth"`                         // Window width in pixels
+	WindowHeight              int             `json:"windowHeight"`                        // Window height in pixels
+	CloseWindowBehavior       string          `json:"closeWindowBehavior,omitempty"`       // "quit", "minimize", "ask"
+	ClaudeNotificationEnabled bool            `json:"claudeNotificationEnabled"`           // Enable Claude Code task completion notification
+	ClaudeNotificationType    string          `json:"claudeNotificationType"`              // Notification type: toast, dialog, disabled
+	ModelsCacheTTL            int             `json:"modelsCacheTTL,omitempty"`            // /v1/models cache TTL in minutes, default 30
+	ModelsCacheRefreshEnabled bool            `json:"modelsCacheRefreshEnabled,omitempty"` // Enable ?refresh=true parameter, default false
+	WebDAV                    *WebDAVConfig   `json:"webdav,omitempty"`                    // WebDAV synchronization config
+	Backup                    *BackupConfig   `json:"backup,omitempty"`                    // Backup/sync configuration
+	Update                    *UpdateConfig   `json:"update,omitempty"`                    // Update configuration
+	Terminal                  *TerminalConfig `json:"terminal,omitempty"`                  // Terminal launcher config
+	Proxy                     *ProxyConfig    `json:"proxy,omitempty"`                     // HTTP proxy config
+	CodexProxy                *ProxyConfig    `json:"codexProxy,omitempty"`                // Codex dedicated proxy config
+	mu                        sync.RWMutex
+}
+
+// DefaultConfig returns a default configuration
+func DefaultConfig() *Config {
+	return &Config{
+		Port:                      52710,
+		BasicAuthEnabled:          true,
+		BasicAuthUsername:         "admin",
+		BasicAuthPassword:         "",
+		LogLevel:                  1,       // Default to INFO level
+		Language:                  "zh-CN", // Default to Chinese
+		WindowWidth:               1024,    // Default window width
+		WindowHeight:              768,     // Default window height
+		ModelsCacheTTL:            30,      // Default 30 minutes
+		ModelsCacheRefreshEnabled: false,   // Default disabled
+		Endpoints: []Endpoint{
+			{
+				Name:        "Claude Official",
+				APIUrl:      "api.anthropic.com",
+				APIKey:      "your-api-key-here",
+				AuthMode:    AuthModeAPIKey,
+				Enabled:     true,
+				Transformer: "claude",
+			},
+		},
+		Update: &UpdateConfig{
+			AutoCheck:     true,
+			CheckInterval: 24,
+		},
+	}
+}
+
+// Validate checks if the configuration is valid
+func (c *Config) Validate() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.Port < 1 || c.Port > 65535 {
+		return fmt.Errorf("invalid port: %d", c.Port)
+	}
+
+	if len(c.Endpoints) == 0 {
+		return fmt.Errorf("no endpoints configured")
+	}
+
+	for i := range c.Endpoints {
+		if c.Endpoints[i].Transformer == "" {
+			c.Endpoints[i].Transformer = "claude"
+		}
+		ApplyEndpointAuthModeRules(&c.Endpoints[i])
+
+		if c.Endpoints[i].APIUrl == "" {
+			return fmt.Errorf("endpoint %d: apiUrl is required", i+1)
+		}
+		if c.Endpoints[i].AuthMode == AuthModeAPIKey && strings.TrimSpace(c.Endpoints[i].APIKey) == "" {
+			return fmt.Errorf("endpoint %d: apiKey is required", i+1)
+		}
+
+	}
+
+	return nil
+}
+
+// GetEndpoints returns a copy of endpoints (thread-safe)
+func (c *Config) GetEndpoints() []Endpoint {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	endpoints := make([]Endpoint, len(c.Endpoints))
+	copy(endpoints, c.Endpoints)
+	return endpoints
+}
+
+// GetPort returns the configured port (thread-safe)
+func (c *Config) GetPort() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Port
+}
+
+// GetLogLevel returns the configured log level (thread-safe)
+func (c *Config) GetLogLevel() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.LogLevel
+}
+
+// GetBasicAuthEnabled returns whether Basic Auth is enabled (thread-safe)
+func (c *Config) GetBasicAuthEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.BasicAuthEnabled
+}
+
+// GetBasicAuthUsername returns Basic Auth username (thread-safe)
+func (c *Config) GetBasicAuthUsername() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.BasicAuthUsername
+}
+
+// GetBasicAuthPassword returns Basic Auth password (thread-safe)
+func (c *Config) GetBasicAuthPassword() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.BasicAuthPassword
+}
+
+// UpdateBasicAuth updates Basic Auth configuration (thread-safe)
+func (c *Config) UpdateBasicAuth(enabled bool, username, password string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.BasicAuthEnabled = enabled
+	c.BasicAuthUsername = username
+	c.BasicAuthPassword = password
+}
+
+// UpdateEndpoints updates the endpoints (thread-safe)
+func (c *Config) UpdateEndpoints(endpoints []Endpoint) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Endpoints = endpoints
+}
+
+// UpdatePort updates the port (thread-safe)
+// If PortLocked is true, the port cannot be changed
+func (c *Config) UpdatePort(port int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.PortLocked {
+		return
+	}
+	c.Port = port
+}
+
+// LockPort locks the port so it cannot be changed via API
+func (c *Config) LockPort() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.PortLocked = true
+}
+
+// IsPortLocked returns true if the port is locked
+func (c *Config) IsPortLocked() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.PortLocked
+}
+
+// UpdateLogLevel updates the log level (thread-safe)
+func (c *Config) UpdateLogLevel(level int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.LogLevel = level
+}
+
+// GetLanguage returns the configured language (thread-safe)
+func (c *Config) GetLanguage() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Language
+}
+
+// UpdateLanguage updates the language (thread-safe)
+func (c *Config) UpdateLanguage(language string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Language = language
+}
+
+// GetWindowSize returns the configured window size (thread-safe)
+func (c *Config) GetWindowSize() (width, height int) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.WindowWidth, c.WindowHeight
+}
+
+// UpdateWindowSize updates the window size (thread-safe)
+func (c *Config) UpdateWindowSize(width, height int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.WindowWidth = width
+	c.WindowHeight = height
+}
+
+// GetCloseWindowBehavior returns the close window behavior (thread-safe)
+// Returns: "quit", "minimize", "ask"
+func (c *Config) GetCloseWindowBehavior() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.CloseWindowBehavior
+}
+
+// UpdateCloseWindowBehavior updates the close window behavior (thread-safe)
+// Accepts: "quit", "minimize", "ask"
+func (c *Config) UpdateCloseWindowBehavior(behavior string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.CloseWindowBehavior = behavior
+}
+
+// GetTheme returns the configured theme (thread-safe)
+// Returns: "light", "dark"
+func (c *Config) GetTheme() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Theme
+}
+
+// UpdateTheme updates the theme (thread-safe)
+// Accepts: "light", "dark"
+func (c *Config) UpdateTheme(theme string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Theme = theme
+}
+
+// GetThemeAuto returns whether auto theme switching is enabled (thread-safe)
+func (c *Config) GetThemeAuto() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.ThemeAuto
+}
+
+// UpdateThemeAuto updates the auto theme setting (thread-safe)
+func (c *Config) UpdateThemeAuto(auto bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ThemeAuto = auto
+}
+
+// GetAutoLightTheme returns the theme to use in daytime when auto mode is on (thread-safe)
+func (c *Config) GetAutoLightTheme() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.AutoLightTheme
+}
+
+// UpdateAutoLightTheme updates the auto light theme (thread-safe)
+func (c *Config) UpdateAutoLightTheme(theme string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.AutoLightTheme = theme
+}
+
+// GetAutoDarkTheme returns the theme to use in nighttime when auto mode is on (thread-safe)
+func (c *Config) GetAutoDarkTheme() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.AutoDarkTheme
+}
+
+// UpdateAutoDarkTheme updates the auto dark theme (thread-safe)
+func (c *Config) UpdateAutoDarkTheme(theme string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.AutoDarkTheme = theme
+}
+
+// GetWebDAV returns the WebDAV configuration (thread-safe)
+func (c *Config) GetWebDAV() *WebDAVConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.WebDAV
+}
+
+// UpdateWebDAV updates the WebDAV configuration (thread-safe)
+func (c *Config) UpdateWebDAV(webdav *WebDAVConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.WebDAV = webdav
+}
+
+// GetBackup returns the backup configuration (thread-safe)
+func (c *Config) GetBackup() *BackupConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Backup
+}
+
+// UpdateBackup updates the backup configuration (thread-safe)
+func (c *Config) UpdateBackup(backup *BackupConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Backup = backup
+}
+
+// GetUpdate returns the Update configuration (thread-safe)
+func (c *Config) GetUpdate() *UpdateConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.Update == nil {
+		return &UpdateConfig{
+			AutoCheck:     true,
+			CheckInterval: 24,
+		}
+	}
+	return c.Update
+}
+
+// UpdateUpdate updates the Update configuration (thread-safe)
+func (c *Config) UpdateUpdate(update *UpdateConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Update = update
+}
+
+// GetTerminal returns the Terminal configuration (thread-safe)
+func (c *Config) GetTerminal() *TerminalConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.Terminal == nil {
+		return &TerminalConfig{
+			SelectedTerminal: "cmd",
+			ProjectDirs:      []string{},
+			ClaudeCommand:    "",
+		}
+	}
+	return c.Terminal
+}
+
+// UpdateTerminal updates the Terminal configuration (thread-safe)
+func (c *Config) UpdateTerminal(terminal *TerminalConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Terminal = terminal
+}
+
+// GetProxy returns the Proxy configuration (thread-safe)
+func (c *Config) GetProxy() *ProxyConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Proxy
+}
+
+// UpdateProxy updates the Proxy configuration (thread-safe)
+func (c *Config) UpdateProxy(proxy *ProxyConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Proxy = proxy
+}
+
+// GetCodexProxy returns the Codex dedicated proxy configuration (thread-safe)
+func (c *Config) GetCodexProxy() *ProxyConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.CodexProxy
+}
+
+// UpdateCodexProxy updates the Codex dedicated proxy configuration (thread-safe)
+func (c *Config) UpdateCodexProxy(proxy *ProxyConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.CodexProxy = proxy
+}
+
+// GetClaudeNotification returns the Claude notification settings (thread-safe)
+func (c *Config) GetClaudeNotification() (enabled bool, notifType string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.ClaudeNotificationEnabled, c.ClaudeNotificationType
+}
+
+// UpdateClaudeNotification updates the Claude notification settings (thread-safe)
+func (c *Config) UpdateClaudeNotification(enabled bool, notifType string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ClaudeNotificationEnabled = enabled
+	c.ClaudeNotificationType = notifType
+}
+
+// StorageAdapter defines the interface needed for loading/saving config
+type StorageAdapter interface {
+	GetEndpoints() ([]StorageEndpoint, error)
+	SaveEndpoint(ep *StorageEndpoint) error
+	UpdateEndpoint(ep *StorageEndpoint) error
+	DeleteEndpoint(name string) error
+	GetConfig(key string) (string, error)
+	SetConfig(key, value string) error
+}
+
+// StorageEndpoint represents an endpoint in storage
+type StorageEndpoint struct {
+	Name        string
+	APIUrl      string
+	APIKey      string
+	AuthMode    string
+	Enabled     bool
+	Transformer string
+	Model       string
+	Remark      string
+	SortOrder   int
+}
+
+// LoadFromStorage loads configuration from SQLite storage
+func LoadFromStorage(storage StorageAdapter) (*Config, error) {
+	config := DefaultConfig()
+	config.Endpoints = []Endpoint{}
+
+	// Load endpoints
+	endpoints, err := storage.GetEndpoints()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load endpoints: %w", err)
+	}
+
+	for _, ep := range endpoints {
+		endpoint := Endpoint{
+			Name:        ep.Name,
+			APIUrl:      ep.APIUrl,
+			APIKey:      ep.APIKey,
+			AuthMode:    NormalizeAuthMode(ep.AuthMode),
+			Enabled:     ep.Enabled,
+			Transformer: ep.Transformer,
+			Model:       ep.Model,
+			Remark:      ep.Remark,
+		}
+		if endpoint.Transformer == "" {
+			endpoint.Transformer = "claude"
+		}
+		ApplyEndpointAuthModeRules(&endpoint)
+		config.Endpoints = append(config.Endpoints, endpoint)
+	}
+
+	// Load app config
+	if portStr, err := storage.GetConfig("port"); err == nil && portStr != "" {
+		if port, err := strconv.Atoi(portStr); err == nil {
+			config.Port = port
+		}
+	}
+	if config.Port == 0 {
+		config.Port = 52710
+	}
+
+	if logLevelStr, err := storage.GetConfig("logLevel"); err == nil && logLevelStr != "" {
+		if logLevel, err := strconv.Atoi(logLevelStr); err == nil {
+			config.LogLevel = logLevel
+		}
+	}
+
+	if modelsCacheTTLStr, err := storage.GetConfig("modelsCacheTTL"); err == nil && modelsCacheTTLStr != "" {
+		if modelsCacheTTL, err := strconv.Atoi(modelsCacheTTLStr); err == nil {
+			config.ModelsCacheTTL = modelsCacheTTL
+		}
+	}
+	if config.ModelsCacheTTL == 0 {
+		config.ModelsCacheTTL = 30 // Default 30 minutes
+	}
+
+	if modelsCacheRefreshEnabledStr, err := storage.GetConfig("modelsCacheRefreshEnabled"); err == nil && modelsCacheRefreshEnabledStr != "" {
+		config.ModelsCacheRefreshEnabled = modelsCacheRefreshEnabledStr == "true"
+	}
+
+	if lang, err := storage.GetConfig("language"); err == nil {
+		config.Language = lang
+	}
+
+	if widthStr, err := storage.GetConfig("windowWidth"); err == nil && widthStr != "" {
+		if width, err := strconv.Atoi(widthStr); err == nil {
+			config.WindowWidth = width
+		}
+	}
+	if config.WindowWidth == 0 {
+		config.WindowWidth = 1024
+	}
+
+	if heightStr, err := storage.GetConfig("windowHeight"); err == nil && heightStr != "" {
+		if height, err := strconv.Atoi(heightStr); err == nil {
+			config.WindowHeight = height
+		}
+	}
+	if config.WindowHeight == 0 {
+		config.WindowHeight = 768
+	}
+
+	// Load close window behavior
+	if behaviorStr, err := storage.GetConfig("closeWindowBehavior"); err == nil && behaviorStr != "" {
+		config.CloseWindowBehavior = behaviorStr
+	}
+	// Default to "ask" if not set
+	if config.CloseWindowBehavior == "" {
+		config.CloseWindowBehavior = "ask"
+	}
+
+	// Load theme
+	if theme, err := storage.GetConfig("theme"); err == nil && theme != "" {
+		config.Theme = theme
+	}
+	// Default to "light" if not set
+	if config.Theme == "" {
+		config.Theme = "light"
+	}
+
+	// Load themeAuto
+	if themeAuto, err := storage.GetConfig("themeAuto"); err == nil && themeAuto != "" {
+		config.ThemeAuto = themeAuto == "true"
+	}
+
+	// Load autoLightTheme
+	if autoLightTheme, err := storage.GetConfig("autoLightTheme"); err == nil && autoLightTheme != "" {
+		config.AutoLightTheme = autoLightTheme
+	}
+	// Default to "light" if not set
+	if config.AutoLightTheme == "" {
+		config.AutoLightTheme = "light"
+	}
+
+	// Load autoDarkTheme
+	if autoDarkTheme, err := storage.GetConfig("autoDarkTheme"); err == nil && autoDarkTheme != "" {
+		config.AutoDarkTheme = autoDarkTheme
+	}
+	// Default to "dark" if not set
+	if config.AutoDarkTheme == "" {
+		config.AutoDarkTheme = "dark"
+	}
+
+	// Load WebDAV config if exists
+	if url, err := storage.GetConfig("webdav_url"); err == nil && url != "" {
+		username, _ := storage.GetConfig("webdav_username")
+		password, _ := storage.GetConfig("webdav_password")
+		configPath, _ := storage.GetConfig("webdav_configPath")
+		statsPath, _ := storage.GetConfig("webdav_statsPath")
+
+		config.WebDAV = &WebDAVConfig{
+			URL:        url,
+			Username:   username,
+			Password:   password,
+			ConfigPath: configPath,
+			StatsPath:  statsPath,
+		}
+	}
+
+	// Load Backup config
+	provider, _ := storage.GetConfig("backup_provider")
+	if provider != "" {
+		config.Backup = &BackupConfig{Provider: provider}
+	}
+	if provider == "local" {
+		backupDir, _ := storage.GetConfig("backup_local_dir")
+		config.Backup.Local = &LocalBackupConfig{Dir: backupDir}
+	}
+	if provider == "s3" {
+		s3Endpoint, _ := storage.GetConfig("backup_s3_endpoint")
+		s3Region, _ := storage.GetConfig("backup_s3_region")
+		s3Bucket, _ := storage.GetConfig("backup_s3_bucket")
+		s3Prefix, _ := storage.GetConfig("backup_s3_prefix")
+		s3AccessKey, _ := storage.GetConfig("backup_s3_accessKey")
+		s3SecretKey, _ := storage.GetConfig("backup_s3_secretKey")
+		s3SessionToken, _ := storage.GetConfig("backup_s3_sessionToken")
+		s3UseSSLStr, _ := storage.GetConfig("backup_s3_useSSL")
+		s3ForcePathStyleStr, _ := storage.GetConfig("backup_s3_forcePathStyle")
+
+		config.Backup.S3 = &S3BackupConfig{
+			Endpoint:       s3Endpoint,
+			Region:         s3Region,
+			Bucket:         s3Bucket,
+			Prefix:         s3Prefix,
+			AccessKey:      s3AccessKey,
+			SecretKey:      s3SecretKey,
+			SessionToken:   s3SessionToken,
+			UseSSL:         s3UseSSLStr == "true",
+			ForcePathStyle: s3ForcePathStyleStr == "true",
+		}
+	}
+
+	// Load Update config
+	config.Update = &UpdateConfig{
+		AutoCheck:     true,
+		CheckInterval: 24,
+	}
+	if autoCheckStr, err := storage.GetConfig("update_autoCheck"); err == nil && autoCheckStr != "" {
+		config.Update.AutoCheck = autoCheckStr == "true"
+	}
+	if intervalStr, err := storage.GetConfig("update_checkInterval"); err == nil && intervalStr != "" {
+		if interval, err := strconv.Atoi(intervalStr); err == nil {
+			config.Update.CheckInterval = interval
+		}
+	}
+	if lastCheck, err := storage.GetConfig("update_lastCheckTime"); err == nil {
+		config.Update.LastCheckTime = lastCheck
+	}
+	if skipped, err := storage.GetConfig("update_skippedVersion"); err == nil {
+		config.Update.SkippedVersion = skipped
+	}
+
+	// Load Terminal config
+	config.Terminal = &TerminalConfig{
+		SelectedTerminal: "cmd",
+		ProjectDirs:      []string{},
+		ClaudeCommand:    "",
+	}
+	if selectedTerminal, err := storage.GetConfig("terminal_selected"); err == nil && selectedTerminal != "" {
+		config.Terminal.SelectedTerminal = selectedTerminal
+	}
+	if projectDirsStr, err := storage.GetConfig("terminal_projectDirs"); err == nil && projectDirsStr != "" {
+		var dirs []string
+		if err := json.Unmarshal([]byte(projectDirsStr), &dirs); err == nil {
+			config.Terminal.ProjectDirs = dirs
+		}
+	}
+	if claudeCmd, err := storage.GetConfig("terminal_claudeCommand"); err == nil {
+		config.Terminal.ClaudeCommand = claudeCmd
+	}
+
+	// Load Proxy config
+	if proxyURL, err := storage.GetConfig("proxy_url"); err == nil && proxyURL != "" {
+		config.Proxy = &ProxyConfig{URL: proxyURL}
+	}
+	if codexProxyURL, err := storage.GetConfig("codex_proxy_url"); err == nil && codexProxyURL != "" {
+		config.CodexProxy = &ProxyConfig{URL: codexProxyURL}
+	}
+
+	// Load Claude notification config
+	if enabledStr, err := storage.GetConfig("claude_notification_enabled"); err == nil && enabledStr != "" {
+		config.ClaudeNotificationEnabled = enabledStr == "true"
+	}
+	if notifType, err := storage.GetConfig("claude_notification_type"); err == nil && notifType != "" {
+		config.ClaudeNotificationType = notifType
+	}
+	// Default to "toast" if not set
+	if config.ClaudeNotificationType == "" {
+		config.ClaudeNotificationType = "toast"
+	}
+
+	// Load Basic Auth config
+	if enabledStr, err := storage.GetConfig("basicAuthEnabled"); err == nil && enabledStr != "" {
+		config.BasicAuthEnabled = enabledStr == "true"
+	}
+	if username, err := storage.GetConfig("basicAuthUsername"); err == nil && username != "" {
+		config.BasicAuthUsername = username
+	}
+	if password, err := storage.GetConfig("basicAuthPassword"); err == nil && password != "" {
+		config.BasicAuthPassword = password
+	}
+
+	return config, nil
+}
+
+// SaveToStorage saves configuration to SQLite storage
+func (c *Config) SaveToStorage(storage StorageAdapter) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Get existing endpoints from storage
+	existingEndpoints, err := storage.GetEndpoints()
+	if err != nil {
+		return fmt.Errorf("failed to get existing endpoints: %w", err)
+	}
+
+	existingNames := make(map[string]bool)
+	for _, ep := range existingEndpoints {
+		existingNames[ep.Name] = true
+	}
+
+	// Save/update endpoints
+	for i, ep := range c.Endpoints {
+		endpoint := &StorageEndpoint{
+			Name:      ep.Name,
+			SortOrder: i, // Use array index as sort order
+		}
+		normalizedEndpoint := Endpoint{
+			Name:        ep.Name,
+			APIUrl:      ep.APIUrl,
+			APIKey:      ep.APIKey,
+			AuthMode:    ep.AuthMode,
+			Enabled:     ep.Enabled,
+			Transformer: ep.Transformer,
+			Model:       ep.Model,
+			Remark:      ep.Remark,
+		}
+		if normalizedEndpoint.Transformer == "" {
+			normalizedEndpoint.Transformer = "claude"
+		}
+		ApplyEndpointAuthModeRules(&normalizedEndpoint)
+		endpoint.APIUrl = normalizedEndpoint.APIUrl
+		endpoint.APIKey = normalizedEndpoint.APIKey
+		endpoint.AuthMode = normalizedEndpoint.AuthMode
+		endpoint.Enabled = normalizedEndpoint.Enabled
+		endpoint.Transformer = normalizedEndpoint.Transformer
+		endpoint.Model = normalizedEndpoint.Model
+		endpoint.Remark = normalizedEndpoint.Remark
+		endpoint.SortOrder = i
+
+		if existingNames[ep.Name] {
+			if err := storage.UpdateEndpoint(endpoint); err != nil {
+				return fmt.Errorf("failed to update endpoint %s: %w", ep.Name, err)
+			}
+		} else {
+			if err := storage.SaveEndpoint(endpoint); err != nil {
+				return fmt.Errorf("failed to save endpoint %s: %w", ep.Name, err)
+			}
+		}
+		delete(existingNames, ep.Name)
+	}
+
+	// Delete endpoints that no longer exist
+	for name := range existingNames {
+		if err := storage.DeleteEndpoint(name); err != nil {
+			return fmt.Errorf("failed to delete endpoint %s: %w", name, err)
+		}
+	}
+
+	// Save app config
+	if err := storage.SetConfig("port", strconv.Itoa(c.Port)); err != nil {
+		return fmt.Errorf("failed to save port config: %w", err)
+	}
+	if err := storage.SetConfig("logLevel", strconv.Itoa(c.LogLevel)); err != nil {
+		return fmt.Errorf("failed to save logLevel config: %w", err)
+	}
+	if err := storage.SetConfig("modelsCacheTTL", strconv.Itoa(c.ModelsCacheTTL)); err != nil {
+		return fmt.Errorf("failed to save modelsCacheTTL config: %w", err)
+	}
+	if err := storage.SetConfig("modelsCacheRefreshEnabled", strconv.FormatBool(c.ModelsCacheRefreshEnabled)); err != nil {
+		return fmt.Errorf("failed to save modelsCacheRefreshEnabled config: %w", err)
+	}
+	if err := storage.SetConfig("language", c.Language); err != nil {
+		return fmt.Errorf("failed to save language config: %w", err)
+	}
+	if err := storage.SetConfig("theme", c.Theme); err != nil {
+		return fmt.Errorf("failed to save theme config: %w", err)
+	}
+	if err := storage.SetConfig("themeAuto", strconv.FormatBool(c.ThemeAuto)); err != nil {
+		return fmt.Errorf("failed to save themeAuto config: %w", err)
+	}
+	if err := storage.SetConfig("autoLightTheme", c.AutoLightTheme); err != nil {
+		return fmt.Errorf("failed to save autoLightTheme config: %w", err)
+	}
+	if err := storage.SetConfig("autoDarkTheme", c.AutoDarkTheme); err != nil {
+		return fmt.Errorf("failed to save autoDarkTheme config: %w", err)
+	}
+	if err := storage.SetConfig("windowWidth", strconv.Itoa(c.WindowWidth)); err != nil {
+		return fmt.Errorf("failed to save windowWidth config: %w", err)
+	}
+	if err := storage.SetConfig("windowHeight", strconv.Itoa(c.WindowHeight)); err != nil {
+		return fmt.Errorf("failed to save windowHeight config: %w", err)
+	}
+	if err := storage.SetConfig("closeWindowBehavior", c.CloseWindowBehavior); err != nil {
+		return fmt.Errorf("failed to save closeWindowBehavior config: %w", err)
+	}
+
+	// Save WebDAV config
+	if c.WebDAV != nil {
+		if err := storage.SetConfig("webdav_url", c.WebDAV.URL); err != nil {
+			return fmt.Errorf("failed to save webdav_url config: %w", err)
+		}
+		if err := storage.SetConfig("webdav_username", c.WebDAV.Username); err != nil {
+			return fmt.Errorf("failed to save webdav_username config: %w", err)
+		}
+		if err := storage.SetConfig("webdav_password", c.WebDAV.Password); err != nil {
+			return fmt.Errorf("failed to save webdav_password config: %w", err)
+		}
+		if err := storage.SetConfig("webdav_configPath", c.WebDAV.ConfigPath); err != nil {
+			return fmt.Errorf("failed to save webdav_configPath config: %w", err)
+		}
+		if err := storage.SetConfig("webdav_statsPath", c.WebDAV.StatsPath); err != nil {
+			return fmt.Errorf("failed to save webdav_statsPath config: %w", err)
+		}
+	}
+
+	// Save Backup config
+	if c.Backup != nil {
+		if err := storage.SetConfig("backup_provider", c.Backup.Provider); err != nil {
+			return fmt.Errorf("failed to save backup_provider config: %w", err)
+		}
+		if c.Backup.Local != nil {
+			if err := storage.SetConfig("backup_local_dir", c.Backup.Local.Dir); err != nil {
+				return fmt.Errorf("failed to save backup_local_dir config: %w", err)
+			}
+		}
+		if c.Backup.S3 != nil {
+			if err := storage.SetConfig("backup_s3_endpoint", c.Backup.S3.Endpoint); err != nil {
+				return fmt.Errorf("failed to save backup_s3_endpoint config: %w", err)
+			}
+			if err := storage.SetConfig("backup_s3_region", c.Backup.S3.Region); err != nil {
+				return fmt.Errorf("failed to save backup_s3_region config: %w", err)
+			}
+			if err := storage.SetConfig("backup_s3_bucket", c.Backup.S3.Bucket); err != nil {
+				return fmt.Errorf("failed to save backup_s3_bucket config: %w", err)
+			}
+			if err := storage.SetConfig("backup_s3_prefix", c.Backup.S3.Prefix); err != nil {
+				return fmt.Errorf("failed to save backup_s3_prefix config: %w", err)
+			}
+			if err := storage.SetConfig("backup_s3_accessKey", c.Backup.S3.AccessKey); err != nil {
+				return fmt.Errorf("failed to save backup_s3_accessKey config: %w", err)
+			}
+			if err := storage.SetConfig("backup_s3_secretKey", c.Backup.S3.SecretKey); err != nil {
+				return fmt.Errorf("failed to save backup_s3_secretKey config: %w", err)
+			}
+			if err := storage.SetConfig("backup_s3_sessionToken", c.Backup.S3.SessionToken); err != nil {
+				return fmt.Errorf("failed to save backup_s3_sessionToken config: %w", err)
+			}
+			if err := storage.SetConfig("backup_s3_useSSL", strconv.FormatBool(c.Backup.S3.UseSSL)); err != nil {
+				return fmt.Errorf("failed to save backup_s3_useSSL config: %w", err)
+			}
+			if err := storage.SetConfig("backup_s3_forcePathStyle", strconv.FormatBool(c.Backup.S3.ForcePathStyle)); err != nil {
+				return fmt.Errorf("failed to save backup_s3_forcePathStyle config: %w", err)
+			}
+		}
+	}
+
+	// Save Update config
+	if c.Update != nil {
+		if err := storage.SetConfig("update_autoCheck", strconv.FormatBool(c.Update.AutoCheck)); err != nil {
+			return fmt.Errorf("failed to save update_autoCheck config: %w", err)
+		}
+		if err := storage.SetConfig("update_checkInterval", strconv.Itoa(c.Update.CheckInterval)); err != nil {
+			return fmt.Errorf("failed to save update_checkInterval config: %w", err)
+		}
+		if err := storage.SetConfig("update_lastCheckTime", c.Update.LastCheckTime); err != nil {
+			return fmt.Errorf("failed to save update_lastCheckTime config: %w", err)
+		}
+		if err := storage.SetConfig("update_skippedVersion", c.Update.SkippedVersion); err != nil {
+			return fmt.Errorf("failed to save update_skippedVersion config: %w", err)
+		}
+	}
+
+	// Save Terminal config
+	if c.Terminal != nil {
+		if err := storage.SetConfig("terminal_selected", c.Terminal.SelectedTerminal); err != nil {
+			return fmt.Errorf("failed to save terminal_selected config: %w", err)
+		}
+		if dirsJSON, err := json.Marshal(c.Terminal.ProjectDirs); err == nil {
+			if err := storage.SetConfig("terminal_projectDirs", string(dirsJSON)); err != nil {
+				return fmt.Errorf("failed to save terminal_projectDirs config: %w", err)
+			}
+		}
+		if err := storage.SetConfig("terminal_claudeCommand", c.Terminal.ClaudeCommand); err != nil {
+			return fmt.Errorf("failed to save terminal_claudeCommand config: %w", err)
+		}
+		storage.SetConfig("terminal_claudeCommand", c.Terminal.ClaudeCommand)
+	}
+
+	// Save Proxy config
+	proxyURL := ""
+	if c.Proxy != nil {
+		proxyURL = c.Proxy.URL
+	}
+	if err := storage.SetConfig("proxy_url", proxyURL); err != nil {
+		return fmt.Errorf("failed to save proxy_url config: %w", err)
+	}
+	codexProxyURL := ""
+	if c.CodexProxy != nil {
+		codexProxyURL = c.CodexProxy.URL
+	}
+	if err := storage.SetConfig("codex_proxy_url", codexProxyURL); err != nil {
+		return fmt.Errorf("failed to save codex_proxy_url config: %w", err)
+	}
+
+	// Save Claude notification config
+	if err := storage.SetConfig("claude_notification_enabled", strconv.FormatBool(c.ClaudeNotificationEnabled)); err != nil {
+		return fmt.Errorf("failed to save claude_notification_enabled config: %w", err)
+	}
+	if err := storage.SetConfig("claude_notification_type", c.ClaudeNotificationType); err != nil {
+		return fmt.Errorf("failed to save claude_notification_type config: %w", err)
+	}
+
+	if err := storage.SetConfig("basicAuthEnabled", strconv.FormatBool(c.BasicAuthEnabled)); err != nil {
+		return fmt.Errorf("failed to save basicAuthEnabled config: %w", err)
+	}
+	if err := storage.SetConfig("basicAuthUsername", c.BasicAuthUsername); err != nil {
+		return fmt.Errorf("failed to save basicAuthUsername config: %w", err)
+	}
+	if err := storage.SetConfig("basicAuthPassword", c.BasicAuthPassword); err != nil {
+		return fmt.Errorf("failed to save basicAuthPassword config: %w", err)
+	}
+
+	return nil
+}

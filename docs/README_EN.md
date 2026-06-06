@@ -1,0 +1,115 @@
+<div align="center">
+
+<p align="center">
+  <img src="images/ccNexus.svg" alt="Claude Code & Codex CLI 智能端点轮换代理" width="720" />
+</p>
+
+[![Build Status](https://github.com/lich0821/ccNexus/workflows/Build%20and%20Release/badge.svg)](https://github.com/lich0821/ccNexus/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go)](https://go.dev/)
+[![Wails](https://img.shields.io/badge/Wails-v2-blue)](https://wails.io/)
+
+[English](README_EN.md) | [简体中文](../README.md)
+
+</div>
+
+## Features
+
+- **Multi-Endpoint Rotation**: Automatic failover, switches to next endpoint on failure
+- **API Format Conversion**: Supports Claude, OpenAI, Gemini format conversion
+- **Codex Token Pool**: Bulk import `access_token/refresh_token` credentials with auto-rotation, auto-refresh, invalid-token isolation, and status management
+- **Token Pool Usage Insights**: Per-credential requests/errors/token counts with quick view
+- **Real-time Statistics**: Event-driven zero-latency stats updates with instant switching between 4 periods (daily/yesterday/weekly/monthly)
+- **Endpoint Filtering**: Multi-select filtering by type, availability, and status for quick endpoint location
+- **WebDAV Sync**: Sync configuration and data across devices
+- **Cross-Platform**: Windows, macOS, Linux
+
+<table>
+  <tr>
+    <td align="center"><img src="images/EN-Light.png" alt="Light Theme" width="400"></td>
+    <td align="center"><img src="images/EN-Dark.png" alt="Dark Theme" width="400"></td>
+  </tr>
+</table>
+
+## Quick Start
+
+### 1. Download and Install
+
+[Download Latest Release](https://github.com/lich0821/ccNexus/releases/latest)
+
+- **Windows**: Extract and run `ccNexus.exe`
+- **macOS**: Move to Applications, right-click → Open for first run
+- **Linux**: `tar -xzf ccNexus-linux-amd64.tar.gz && ./ccNexus`
+
+### 2. Add Endpoints
+
+Click "Add Endpoint", fill in API URL, key, and select transformer (claude/openai/gemini/openai2).
+
+For Codex Token Pool mode:
+- Set auth mode to `Codex Token Pool`
+- Import token JSON records in the Token Pool page (`access_token` + `refresh_token`)
+- ccNexus will handle token rotation, 401-triggered refresh, and lifecycle statuses (active/expiring/need_refresh/invalid, etc.)
+
+### 3. Configure CC
+
+#### Claude Code
+`~/.claude/settings.json`
+```json
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "anything, not important",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:3000",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000", // Some models may not support 64k
+  }
+  // Other settings
+}
+
+```
+
+#### Codex CLI
+Just configure `~/.codex/config.toml`:
+```toml
+model_provider = "ccNexus"
+model = "gpt-5-codex"
+preferred_auth_method = "apikey"
+
+[model_providers.ccNexus]
+name = "ccNexus"
+base_url = "http://localhost:3000/v1"
+wire_api = "responses"  # or "chat"
+
+# Other settings
+```
+
+`~/.codex/auth.json` can be ignored.
+
+## Runtime Notes
+
+- ccNexus listens on port `3000` by default. Override it with the `-port` CLI flag or `CCNEXUS_PORT`.
+- If Basic Auth is enabled and no password is stored, the app generates a random password on first launch and prints it to logs.
+- For headless deployments, prefer a trusted LAN or put ccNexus behind a reverse proxy with TLS and access control.
+
+## Get Help
+
+<table>
+  <tr>
+    <td align="center"><img src="https://gitee.com/hea7en/images/raw/master/group/chat.png" alt="WeChat Group" width="200"></td>
+    <td align="center"><img src="../cmd/desktop/frontend/public/WeChat.jpg" alt="Official Account" width="200"></td>
+    <td align="center"><img src="../cmd/desktop/frontend/public/ME.png" alt="Personal WeChat" width="200"></td>
+  </tr>
+  <tr>
+    <td align="center">Join group for feedback</td>
+    <td align="center">Official Account</td>
+    <td align="center">Add me if group expired</td>
+  </tr>
+</table>
+
+## Documentation
+
+- [Configuration Guide](configuration_en.md)
+- [Development Guide](development_en.md)
+- [FAQ](FAQ_en.md)
+
+## License
+
+[MIT](LICENSE)
