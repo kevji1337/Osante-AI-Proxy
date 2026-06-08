@@ -66,6 +66,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleEvents(w, r)
 	case "/api/logs":
 		h.handleLogs(w, r)
+	case "/api/logs/stream":
+		h.handleLogsStream(w, r)
+	case "/api/trace":
+		h.handleTrace(w, r)
+	case "/api/actions/clear-cooldowns":
+		h.handleClearCooldowns(w, r)
+	case "/api/actions/flush-stats":
+		h.handleFlushStats(w, r)
+	case "/api/actions/export-backup":
+		h.handleExportBackup(w, r)
 	default:
 		if strings.HasPrefix(path, "/api/endpoints/") {
 			h.handleEndpointByName(w, r)

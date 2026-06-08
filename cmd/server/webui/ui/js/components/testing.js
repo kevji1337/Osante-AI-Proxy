@@ -2,6 +2,8 @@ import { api } from '../api.js';
 import { notifications } from '../utils/notifications.js';
 import { t } from '../utils/i18n.js';
 
+const SELECTED_KEY = 'testing.selectedEndpoint';
+
 class Testing {
     constructor() {
         this.container = document.getElementById('view-container');
@@ -35,6 +37,17 @@ class Testing {
         document.getElementById('test-btn').addEventListener('click', () => this.runTest());
 
         await this.loadEndpoints();
+
+        // Persist the user's choice across reloads / tab switches so a repeated
+        // smoke-test of the same endpoint doesn't require re-picking it.
+        const select = document.getElementById('test-endpoint-select');
+        select.addEventListener('change', () => {
+            try {
+                localStorage.setItem(SELECTED_KEY, select.value);
+            } catch {
+                // Ignore quota / privacy-mode errors.
+            }
+        });
     }
 
     async loadEndpoints() {
@@ -53,6 +66,17 @@ class Testing {
             select.innerHTML = enabledEndpoints.map(ep =>
                 `<option value="${this.escapeHtml(ep.name)}">${this.escapeHtml(ep.name)}</option>`
             ).join('');
+
+            // Restore previously selected endpoint if it still exists & is enabled.
+            let saved = '';
+            try {
+                saved = localStorage.getItem(SELECTED_KEY) || '';
+            } catch {
+                saved = '';
+            }
+            if (saved && enabledEndpoints.some(ep => ep.name === saved)) {
+                select.value = saved;
+            }
         } catch (error) {
             notifications.error(`${t('testing.failedToLoadEndpoints')}: ${error.message}`);
         }

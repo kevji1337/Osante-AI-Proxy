@@ -290,7 +290,7 @@ func FormatSize(size int64) string {
 	switch {
 	case size >= MB:
 		return strings.TrimSuffix(strings.TrimSuffix(
-			strings.Replace(string(rune(size/MB))+"."+ string(rune((size%MB)*10/MB)), ".", "", 1),
+			strings.Replace(string(rune(size/MB))+"."+string(rune((size%MB)*10/MB)), ".", "", 1),
 			"0"), ".") + " MB"
 	case size >= KB:
 		return strings.TrimSuffix(strings.TrimSuffix(

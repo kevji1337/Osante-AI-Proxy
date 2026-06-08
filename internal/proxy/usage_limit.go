@@ -191,3 +191,22 @@ func (p *Proxy) EndpointRuntimeSnapshot() map[string]EndpointRuntime {
 	}
 	return out
 }
+
+// ClearAllCooldowns wipes endpoint-level cooldowns and error flags. Token
+// pool cooldowns persisted in SQLite are NOT touched here; use
+// ClearAllTokenCooldowns for those. Returns number of endpoints affected.
+func (p *Proxy) ClearAllCooldowns() int {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	n := 0
+	for _, st := range p.endpointStates {
+		if !st.cooldownUntil.IsZero() || st.hasError {
+			n++
+		}
+		st.cooldownUntil = time.Time{}
+		st.cooldownReason = ""
+		st.hasError = false
+		st.lastError = ""
+	}
+	return n
+}

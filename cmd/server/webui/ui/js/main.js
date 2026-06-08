@@ -6,25 +6,43 @@ import { endpoints } from './components/endpoints.js';
 import { stats } from './components/stats.js';
 import { testing } from './components/testing.js';
 import { logs } from './components/logs.js';
+import { inspector } from './components/inspector.js';
+import { installKeyboardShortcuts } from './shortcuts.js';
 import en from './i18n/en.js';
 
 // English-only.
 loadTranslations({ en });
 initLanguage();
 
-// Initialize theme
+// Initialize theme.
+//
+// The terminal aesthetic is dark-by-default. `light-theme` is the opt-in
+// override applied to <body>. We keep the legacy `dark-theme` class around
+// only for compatibility with any external bookmarklets or styles — the CSS
+// never reads it any more.
 function initTheme() {
-    const savedTheme = localStorage.getItem('theme') || 'light';
-    document.body.classList.toggle('dark-theme', savedTheme === 'dark');
+    const savedTheme = localStorage.getItem('theme') || 'dark';
+    const isLight = savedTheme === 'light';
+    document.body.classList.toggle('light-theme', isLight);
+    document.body.classList.toggle('dark-theme', !isLight);
 
     const themeToggle = document.getElementById('theme-toggle');
-    themeToggle.addEventListener('click', () => {
-        const isDark = document.body.classList.toggle('dark-theme');
-        localStorage.setItem('theme', isDark ? 'dark' : 'light');
-        themeToggle.querySelector('.icon').textContent = isDark ? '☀️' : '🌙';
-    });
+    const iconEl = themeToggle.querySelector('.icon');
 
-    themeToggle.querySelector('.icon').textContent = savedTheme === 'dark' ? '☀️' : '🌙';
+    const setIcon = (isLightNow) => {
+        // ◐ for light, ● for dark — keep terminal glyphs instead of emoji so
+        // they match the rest of the UI's mono palette.
+        iconEl.textContent = isLightNow ? '◐' : '●';
+    };
+
+    setIcon(isLight);
+
+    themeToggle.addEventListener('click', () => {
+        const nowLight = document.body.classList.toggle('light-theme');
+        document.body.classList.toggle('dark-theme', !nowLight);
+        localStorage.setItem('theme', nowLight ? 'light' : 'dark');
+        setIcon(nowLight);
+    });
 }
 
 // Apply translations to the sidebar (subtitle + nav labels).
@@ -75,11 +93,13 @@ function init() {
     router.register('stats', stats);
     router.register('testing', testing);
     router.register('logs', logs);
+    router.register('inspector', inspector);
 
     initTheme();
     updateSidebarTranslations();
     router.init();
     initRealtime();
+    installKeyboardShortcuts();
 
     console.log('Osante Proxy admin initialized');
 }

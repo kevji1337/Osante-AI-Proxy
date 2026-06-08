@@ -79,9 +79,8 @@ CLI `-port N` locks the port so it can't be changed via the API.
 ## Layout
 
 ```
-cmd/server/      headless HTTP server (active)
-cmd/desktop/     Wails desktop app (inherited from upstream, not maintained here)
-internal/       proxy core, transformers, storage, logger, config
+cmd/server/      headless HTTP server + embedded admin Web UI
+internal/        proxy core, transformers, storage, logger, config
 ```
 
 ## License

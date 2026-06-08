@@ -75,7 +75,8 @@ func (h *Handler) sendTestRequest(endpoint *storage.Endpoint) (string, error) {
 // sendTestRequestWithKey sends a test request to an endpoint using an explicit
 // API key. Used by the per-credential test action so the caller can target one
 // specific token from the pool instead of whichever the pool would rotate to.
-func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey string) (string, error) {	var reqBody []byte
+func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey string) (string, error) {
+	var reqBody []byte
 	var url string
 	var err error
 

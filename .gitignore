@@ -1,18 +1,9 @@
 .*
 !.gitignore
 !.github/
+!.golangci.yml
 
 # Build artifacts
-cmd/desktop/build/*
-!cmd/desktop/build/appicon.png
-!cmd/desktop/build/appicon.svg
-!cmd/desktop/build/darwin/
-cmd/desktop/build/darwin/*
-!cmd/desktop/build/darwin/Info.plist
-!cmd/desktop/build/windows/
-cmd/desktop/build/windows/*
-!cmd/desktop/build/windows/icon.ico
-!cmd/desktop/build/windows/wails.exe.manifest
 
 dist/
 *.exe
@@ -50,3 +41,5 @@ node_modules/
 *.log
 /cmd/server/osante/
 /cmd/server/build/
+IMPROVEMENTS.md
+CLAUDE.md

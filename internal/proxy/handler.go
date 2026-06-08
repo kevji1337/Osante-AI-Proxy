@@ -3,46 +3,132 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
+	"runtime"
+	"time"
 
 	"github.com/kevji1337/Osante-AI-Proxy/internal/config"
 	"github.com/kevji1337/Osante-AI-Proxy/internal/logger"
 	"github.com/kevji1337/Osante-AI-Proxy/internal/tokencount"
 )
 
-// handleHealth handles health check requests
+// healthEndpointStatus is the per-endpoint slice of /health output.
+type healthEndpointStatus struct {
+	Name                   string `json:"name"`
+	Enabled                bool   `json:"enabled"`
+	Transformer            string `json:"transformer,omitempty"`
+	InCooldown             bool   `json:"in_cooldown"`
+	CooldownRemainingSec   int64  `json:"cooldown_remaining_sec,omitempty"`
+	CooldownReason         string `json:"cooldown_reason,omitempty"`
+	LastError              string `json:"last_error,omitempty"`
+	LastErrorAtUnix        int64  `json:"last_error_at_unix,omitempty"`
+	HasError               bool   `json:"has_error"`
+	TokenPoolTotal         int    `json:"token_pool_total,omitempty"`
+	TokenPoolActive        int    `json:"token_pool_active,omitempty"`
+	TokenPoolCooldown      int    `json:"token_pool_cooldown,omitempty"`
+	TokenPoolInvalid       int    `json:"token_pool_invalid,omitempty"`
+	TokenPoolExpired       int    `json:"token_pool_expired,omitempty"`
+	TokenPoolExpiring      int    `json:"token_pool_expiring,omitempty"`
+	TokenPoolNeedRefresh   int    `json:"token_pool_need_refresh,omitempty"`
+	TokenPoolDisabled      int    `json:"token_pool_disabled,omitempty"`
+}
+
+// handleHealth handles health check requests with a detailed JSON snapshot
+// suitable for prometheus-style scrapers and watch scripts.
+//
+// The endpoint stays unauthenticated since the entire admin API is
+// unauthenticated by design on loopback. API keys are NOT exposed.
 func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
 
-	endpoints := p.getEnabledEndpoints()
+	endpoints := p.config.GetEndpoints()
+	enabledCount := 0
+	runtimeMap := p.EndpointRuntimeSnapshot()
+	now := time.Now().UTC()
 
-	// Mask API keys before sending response to prevent security leak
-	maskedEndpoints := make([]config.Endpoint, len(endpoints))
-	for i, ep := range endpoints {
-		maskedEndpoints[i] = ep
-		maskedEndpoints[i].APIKey = maskAPIKey(ep.APIKey)
+	statuses := make([]healthEndpointStatus, 0, len(endpoints))
+	overallHealthy := true
+	for _, ep := range endpoints {
+		st := healthEndpointStatus{
+			Name:        ep.Name,
+			Enabled:     ep.Enabled,
+			Transformer: ep.Transformer,
+		}
+		if ep.Enabled {
+			enabledCount++
+		}
+
+		if rt, ok := runtimeMap[ep.Name]; ok {
+			st.HasError = rt.HasError
+			st.LastError = rt.LastError
+			if !rt.LastErrorAt.IsZero() {
+				st.LastErrorAtUnix = rt.LastErrorAt.Unix()
+			}
+			if !rt.CooldownUntil.IsZero() && rt.CooldownUntil.After(now) {
+				st.InCooldown = true
+				st.CooldownRemainingSec = int64(rt.CooldownUntil.Sub(now).Seconds())
+				st.CooldownReason = rt.CooldownReason
+			}
+		}
+
+		// Token-pool stats only when the endpoint is in token-pool mode and we
+		// have a storage backend. Best-effort: any error here is non-fatal.
+		if p.storage != nil && config.IsTokenPoolAuthMode(ep.AuthMode) {
+			if pool, err := p.storage.GetTokenPoolStats(ep.Name); err == nil {
+				st.TokenPoolTotal = pool.Total
+				st.TokenPoolActive = pool.Active
+				st.TokenPoolCooldown = pool.Cooldown
+				st.TokenPoolInvalid = pool.Invalid
+				st.TokenPoolExpired = pool.Expired
+				st.TokenPoolExpiring = pool.Expiring
+				st.TokenPoolNeedRefresh = pool.NeedRefresh
+				st.TokenPoolDisabled = pool.Disabled
+			}
+		}
+
+		if ep.Enabled && (st.InCooldown || st.HasError) {
+			overallHealthy = false
+		}
+		statuses = append(statuses, st)
 	}
+
+	overallStatus := "healthy"
+	if !overallHealthy {
+		overallStatus = "degraded"
+	}
+	if enabledCount == 0 {
+		overallStatus = "no_endpoints"
+	}
+
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
 
 	response := map[string]interface{}{
-		"status":            "healthy",
-		"enabled_endpoints": len(endpoints),
-		"endpoints":         maskedEndpoints,
+		"status":            overallStatus,
+		"version":           "0.1",
+		"uptime_sec":        int64(time.Since(p.startedAt).Seconds()),
+		"started_at_unix":   p.startedAt.Unix(),
+		"enabled_endpoints": enabledCount,
+		"total_endpoints":   len(endpoints),
+		"endpoints":         statuses,
+		"runtime": map[string]interface{}{
+			"goroutines":      runtime.NumGoroutine(),
+			"go_version":      runtime.Version(),
+			"heap_alloc_mb":   float64(mem.HeapAlloc) / 1024.0 / 1024.0,
+			"heap_sys_mb":     float64(mem.HeapSys) / 1024.0 / 1024.0,
+			"num_gc":          mem.NumGC,
+		},
 	}
 
+	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
 }
 
-// maskAPIKey masks an API key for security, showing only first 4 and last 4 characters
-func maskAPIKey(key string) string {
-	if key == "" {
-		return ""
-	}
-	if len(key) <= 8 {
-		return "****"
-	}
-	return key[:4] + strings.Repeat("*", len(key)-8) + key[len(key)-4:]
-}
+// maskAPIKey was used by the old verbose /health response that returned full
+// endpoint configs. The new /health output only emits per-endpoint runtime
+// stats — no API keys, no model strings — so the masking helper is no longer
+// needed. Kept in version control history in case some external consumer
+// still reads /api/endpoints (which DOES return configs and uses its own
+// masking).
 
 // handleStats handles statistics requests
 func (p *Proxy) handleStats(w http.ResponseWriter, r *http.Request) {

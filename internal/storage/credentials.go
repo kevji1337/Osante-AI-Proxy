@@ -143,6 +143,13 @@ func (s *SQLiteStorage) GetEndpointCredentials(endpointName string) ([]EndpointC
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// Ordering: enabled first; non-cooldown ahead of cooldown; among cooldown
+	// rows, the ones that come back online soonest first; finally tie-break
+	// by failure_count, oldest last-used, updated_at.
+	//
+	// This drives both selectCredential (picks the first usable row) and the
+	// UI's credential list, so the operator sees "ready" tokens first and
+	// "back at HH:MM" tokens sorted by who reactivates next.
 	rows, err := s.db.Query(`
 		SELECT
 			id, endpoint_name, provider_type, account_id, email, access_token, refresh_token, id_token,
@@ -150,7 +157,13 @@ func (s *SQLiteStorage) GetEndpointCredentials(endpointName string) ([]EndpointC
 			last_used_at, last_error, remark, created_at, updated_at
 		FROM endpoint_credentials
 		WHERE endpoint_name=?
-		ORDER BY enabled DESC, failure_count ASC, COALESCE(last_used_at, created_at) ASC, updated_at DESC
+		ORDER BY
+			enabled DESC,
+			(cooldown_until IS NULL OR cooldown_until <= CURRENT_TIMESTAMP) DESC,
+			cooldown_until ASC,
+			failure_count ASC,
+			COALESCE(last_used_at, created_at) ASC,
+			updated_at DESC
 	`, endpointName)
 	if err != nil {
 		return nil, err
@@ -408,6 +421,35 @@ func (s *SQLiteStorage) GetUsableEndpointCredential(endpointName string, now tim
 	}
 
 	return nil, nil
+}
+
+// EarliestTokenCooldown returns the earliest cooldown_until across enabled
+// credentials of an endpoint that is still in the future. Returns the zero
+// time when no enabled credential is currently cooled (the pool either has
+// usable tokens or is empty/invalid). Used by the proxy to short-circuit the
+// retry loop once all tokens are in cooldown: instead of crawling every
+// endpoint twice, set an endpoint-level cooldown until the soonest token
+// reactivates.
+func (s *SQLiteStorage) EarliestTokenCooldown(endpointName string, now time.Time) (time.Time, error) {
+	credentials, err := s.GetEndpointCredentials(endpointName)
+	if err != nil {
+		return time.Time{}, err
+	}
+	var earliest time.Time
+	for i := range credentials {
+		c := &credentials[i]
+		if !c.Enabled || c.CooldownUntil == nil {
+			continue
+		}
+		until := c.CooldownUntil.UTC()
+		if !until.After(now) {
+			continue
+		}
+		if earliest.IsZero() || until.Before(earliest) {
+			earliest = until
+		}
+	}
+	return earliest, nil
 }
 
 func (s *SQLiteStorage) MarkCredentialSuccess(id int64, now time.Time) error {

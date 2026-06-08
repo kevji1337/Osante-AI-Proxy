@@ -95,7 +95,7 @@ func main() {
 		errCh <- p.StartWithMux(mux)
 	}()
 
-	logger.Info("Osante Proxy headless API listening on :%d (data dir: %s, db: %s)", cfg.GetPort(), dataDir, dbPath)
+	logger.Info("Osante Proxy headless API listening on %s:%d (data dir: %s, db: %s)", proxy.ResolveBindHost(), cfg.GetPort(), dataDir, dbPath)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

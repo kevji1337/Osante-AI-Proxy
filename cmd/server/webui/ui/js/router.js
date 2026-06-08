@@ -1,6 +1,8 @@
 // Simple client-side router
 import { state } from './state.js';
 
+const VIEW_STORAGE_KEY = 'currentView';
+
 class Router {
     constructor() {
         this.routes = new Map();
@@ -27,6 +29,11 @@ class Router {
 
         // Update state
         state.update('currentView', viewName);
+        try {
+            localStorage.setItem(VIEW_STORAGE_KEY, viewName);
+        } catch (e) {
+            // Ignore quota / privacy-mode errors — persistence is best-effort.
+        }
 
         // Render view
         const component = this.routes.get(viewName);
@@ -44,8 +51,17 @@ class Router {
             });
         });
 
-        // Navigate to initial view
-        const initialView = state.get('currentView');
+        // Restore the last visited view from localStorage; fall back to the
+        // default in state if storage is empty or holds an unknown view.
+        let initialView = state.get('currentView');
+        try {
+            const saved = localStorage.getItem(VIEW_STORAGE_KEY);
+            if (saved && this.routes.has(saved)) {
+                initialView = saved;
+            }
+        } catch (e) {
+            // Ignore — fall back to default.
+        }
         this.navigate(initialView);
     }
 }

@@ -94,13 +94,81 @@ Web admin / JSON API routes are under `/api/...` and `/ui/`.
 | Var                | Default                       |
 |--------------------|-------------------------------|
 | `OSANTE_PORT`      | `52710`                       |
+| `OSANTE_BIND`      | `127.0.0.1` (loopback only)   |
 | `OSANTE_DATA_DIR`  | `~/.Osante`                   |
 | `OSANTE_DB_PATH`   | `$OSANTE_DATA_DIR/osante.db`  |
 | `OSANTE_LOG_LEVEL` | `1` (INFO)                    |
 
-The admin API and the web UI are unauthenticated — BasicAuth has been removed completely.
+The admin API and the web UI are unauthenticated — BasicAuth has been removed
+completely. The default `OSANTE_BIND=127.0.0.1` enforces loopback-only; set
+`OSANTE_BIND=0.0.0.0` (or `::`) only if you explicitly want LAN access. The
+proxy logs a WARN on non-loopback binds.
 
 ## Dependencies
 
 - Go 1.24+
 - SQLite via `modernc.org/sqlite` (pure Go)
+
+## Obsidian Memory
+
+Project memory lives in the Obsidian vault `Obsidian Memories` under the folder
+`Osante Proxy/`. Access it through the **`obsidian` skill** (invoke via the
+`Skill` tool, not by shelling out to `obsidian` directly — the skill loads the
+full command reference and conventions). The skill talks to a running Obsidian
+desktop instance via its plugin.
+
+### Files maintained in the vault
+
+| File | Purpose |
+|---|---|
+| `Osante Proxy/context.md` | Project overview: stack, entry points, key modules, current state. Update when architecture shifts. |
+| `Osante Proxy/decisions.md` | Decision log — one entry per non-trivial choice, ISO date prefix. |
+| `Osante Proxy/todo.md` | Open tasks and questions carried between sessions. |
+| `Osante Proxy/daily/YYYY-MM-DD.md` | Per-session journal — what was done, what's pending. |
+
+### Session protocol
+
+**At the start of every session:** invoke the `obsidian` skill, then read the
+context file:
+
+```
+obsidian vault="Obsidian Memories" read path="Osante Proxy/context.md"
+```
+
+If the file doesn't exist, create it with a starter overview via the same
+skill (`create path="Osante Proxy/context.md" content="..."`). Optionally also
+read `todo.md` and the latest `daily/*.md` to pick up unfinished threads.
+
+**At the end of a non-trivial session:**
+
+1. Append a session summary to today's daily note:
+   `append path="Osante Proxy/daily/<YYYY-MM-DD>.md" content="..."`.
+   If the daily file doesn't exist yet, `create` it first with a
+   `# YYYY-MM-DD` header.
+2. If architectural decisions were made, append to `decisions.md` with a
+   `## YYYY-MM-DD — <title>` heading and a short rationale.
+3. If the project shape changed (new module, removed feature, new env var),
+   update the relevant section of `context.md`.
+4. If new open questions surfaced, add them to `todo.md`.
+
+### Error handling
+
+The skill needs the Obsidian desktop app to be running. If a command returns
+"Obsidian is not running" or connection refused:
+
+- **Do not fail the session.** Continue with whatever the user asked for.
+- **Surface the error once,** so the user can launch Obsidian if they want
+  memory updated. Do not retry silently.
+- Missed updates can be reapplied manually at the start of the next session.
+
+### Shell quoting gotcha
+
+When passing markdown bodies to `create` / `append`, **never** inline a large
+content string directly in a bash heredoc/command — backticks and `$(...)`
+patterns in the markdown will be interpreted by the shell. Instead:
+
+1. Write the content to a temp file (or directly into the vault path on disk).
+2. Use the skill to verify with `read` / `file` afterwards.
+
+The vault lives on disk at `C:\programming\Obsidian Memories\`, so writing
+files there directly is a valid alternative for bulk content.

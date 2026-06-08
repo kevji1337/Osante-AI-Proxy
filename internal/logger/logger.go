@@ -65,6 +65,9 @@ type Logger struct {
 	consoleLevel LogLevel // Minimum level to print to console
 	debugFile    *os.File // Debug log file (only in debug mode)
 	debugMu      sync.Mutex
+	subsMu       sync.RWMutex
+	subs         map[int]chan LogEntry // SSE subscribers (real-time tail)
+	nextSubID    int
 }
 
 var (
@@ -80,6 +83,7 @@ func GetLogger() *Logger {
 			maxSize:      1000,  // Keep last 1000 logs
 			minLevel:     DEBUG, // Default to DEBUG level to capture all logs
 			consoleLevel: INFO,  // Default console level to INFO (skip DEBUG in console)
+			subs:         make(map[int]chan LogEntry),
 		}
 	})
 	return instance
@@ -108,10 +112,20 @@ func (l *Logger) GetMinLevel() LogLevel {
 
 // Log adds a new log entry
 func (l *Logger) Log(level LogLevel, format string, args ...interface{}) {
+	// Hot-path early-out: drop *before* formatting. fmt.Sprintf on every
+	// silenced SSE event would allocate many MB across a long stream.
+	l.mu.RLock()
+	minLevel := l.minLevel
+	l.mu.RUnlock()
+	if level < minLevel {
+		return
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Skip if below minimum level
+	// Re-check under the write lock — minLevel might have moved between the
+	// RLock check and us acquiring the write lock.
 	if level < l.minLevel {
 		return
 	}
@@ -136,6 +150,47 @@ func (l *Logger) Log(level LogLevel, format string, args ...interface{}) {
 	// Print to console only if level >= consoleLevel
 	if level >= l.consoleLevel {
 		fmt.Printf("%s [%s] %s\n", entry.Icon, entry.LevelStr, entry.Message)
+	}
+
+	// Fan-out to SSE subscribers. Non-blocking: a slow subscriber misses
+	// entries rather than holding up the logger lock. We snapshot the
+	// subscriber list under subsMu so iteration doesn't race Subscribe.
+	l.subsMu.RLock()
+	for _, ch := range l.subs {
+		select {
+		case ch <- entry:
+		default:
+			// drop — subscriber is too slow
+		}
+	}
+	l.subsMu.RUnlock()
+}
+
+// Subscribe registers a buffered channel that receives every new log entry
+// recorded at or above minLevel. Returns the subscription ID and the channel.
+// Caller MUST drain the channel and call Unsubscribe when done — otherwise
+// the buffer fills and entries are silently dropped (which is benign but
+// shows as gaps in the UI).
+func (l *Logger) Subscribe(buffer int) (int, <-chan LogEntry) {
+	if buffer < 1 {
+		buffer = 64
+	}
+	ch := make(chan LogEntry, buffer)
+	l.subsMu.Lock()
+	defer l.subsMu.Unlock()
+	l.nextSubID++
+	id := l.nextSubID
+	l.subs[id] = ch
+	return id, ch
+}
+
+// Unsubscribe removes a subscription and closes its channel.
+func (l *Logger) Unsubscribe(id int) {
+	l.subsMu.Lock()
+	defer l.subsMu.Unlock()
+	if ch, ok := l.subs[id]; ok {
+		delete(l.subs, id)
+		close(ch)
 	}
 }
 

@@ -35,9 +35,36 @@ class Endpoints {
         `;
 
         document.getElementById('add-endpoint-btn').addEventListener('click', () => this.showAddModal());
+        this.installModalDismissHandlers();
 
         await this.loadEndpoints();
         this.startAutoRefresh();
+    }
+
+    // Wire up global "click outside to close" and "Esc to close" handlers for
+    // the modal container. Done once on view init — subsequent modals don't
+    // need to re-bind. Inner overlays (e.g. nested model-selection modal) opt
+    // out via .no-overlay-dismiss on their .modal-overlay element.
+    installModalDismissHandlers() {
+        const container = document.getElementById('modal-container');
+        if (!container || container.dataset.dismissBound === '1') return;
+        container.dataset.dismissBound = '1';
+
+        container.addEventListener('click', (e) => {
+            const overlay = e.target.closest('.modal-overlay');
+            if (!overlay || overlay.classList.contains('no-overlay-dismiss')) return;
+            // Close only when the click landed on the overlay itself, not on
+            // the modal content inside it.
+            if (e.target === overlay) {
+                this.closeModal();
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key !== 'Escape') return;
+            if (container.children.length === 0) return;
+            this.closeModal();
+        });
     }
 
     // Refresh endpoint data every 5s so the cooldown countdown stays current.
@@ -112,8 +139,9 @@ class Endpoints {
         const allLimited = enabledEndpoints.length > 0 &&
             enabledEndpoints.every(ep => (this.states[ep.name]?.status) === 'limited');
         const warningHtml = allLimited ? `
-            <div style="margin-bottom: 12px; padding: 10px 14px; border-radius: 8px; background:#fef3c7; color:#92400e; border:1px solid #fcd34d; font-weight:500;">
-                ⚠️ ${t('endpoints.allLimitedWarning')}
+            <div class="alert alert-warning">
+                <span class="alert-icon">⚠</span>
+                <span>${t('endpoints.allLimitedWarning')}</span>
             </div>
         ` : '';
 
@@ -200,6 +228,9 @@ class Endpoints {
                         <button class="btn btn-sm btn-secondary clone-btn" data-name="${this.escapeHtml(ep.name)}">
                             ${t('common.clone')}
                         </button>
+                        <button class="btn btn-sm btn-secondary copy-config-btn" data-name="${this.escapeHtml(ep.name)}" title="${t('endpoints.copyConfig')}">
+                            ${t('endpoints.copyConfig')}
+                        </button>
                         <button class="btn btn-sm btn-danger delete-btn" data-name="${this.escapeHtml(ep.name)}">
                             ${t('common.delete')}
                         </button>
@@ -236,9 +267,9 @@ class Endpoints {
         };
         const label = labelMap[status] || status;
 
-        // disabled has no theme badge class -> render a neutral grey badge inline.
+        // disabled has no theme badge class -> render a neutral badge.
         if (status === 'disabled') {
-            return `<span class="badge" style="background:#e5e7eb;color:#374151;">${label}</span>`;
+            return `<span class="badge badge-neutral">${label}</span>`;
         }
         const classMap = {
             active: 'badge-success',
@@ -318,6 +349,11 @@ class Endpoints {
         document.querySelectorAll('.copy-btn').forEach(btn => {
             btn.addEventListener('click', () => this.copyToClipboard(btn.dataset.copy, btn));
         });
+
+        // Copy-config buttons (per-row Claude/Codex client config snippet).
+        document.querySelectorAll('.copy-config-btn').forEach(btn => {
+            btn.addEventListener('click', () => this.showCopyConfigModal(btn.dataset.name));
+        });
     }
 
     attachDragListeners() {
@@ -335,16 +371,19 @@ class Endpoints {
 
             row.addEventListener('dragover', (e) => {
                 e.preventDefault();
-                row.style.borderTop = '2px solid #3b82f6';
+                row.style.borderTop = '2px solid var(--acid)';
+                row.style.boxShadow = 'inset 0 1px 0 var(--acid-glow)';
             });
 
             row.addEventListener('dragleave', (e) => {
                 row.style.borderTop = '';
+                row.style.boxShadow = '';
             });
 
             row.addEventListener('drop', async (e) => {
                 e.preventDefault();
                 row.style.borderTop = '';
+                row.style.boxShadow = '';
 
                 const dropIndex = parseInt(row.dataset.index);
                 if (this.draggedIndex !== null && this.draggedIndex !== dropIndex) {
@@ -393,6 +432,101 @@ class Endpoints {
         }).catch(err => {
             notifications.error(t('endpoints.failedToCopy'));
         });
+    }
+
+    // showCopyConfigModal renders a small modal with ready-to-paste client
+    // config blocks for Claude Code (env vars) and Codex CLI (config.toml +
+    // auth.json). The proxy URL is derived from window.location so it matches
+    // however the user opened the UI (host:port).
+    showCopyConfigModal(endpointName) {
+        const endpoint = this.endpoints.find(ep => ep.name === endpointName);
+        if (!endpoint) return;
+
+        const proto = window.location.protocol === 'https:' ? 'https' : 'http';
+        const host = window.location.host; // includes port
+        const proxyBase = `${proto}://${host}`;
+        const model = (endpoint.model || '').trim() || 'gpt-5.4';
+
+        const claudeEnv =
+            `ANTHROPIC_BASE_URL=${proxyBase}\n` +
+            `ANTHROPIC_AUTH_TOKEN=anything`;
+
+        const codexToml =
+            `model_provider = "osante"\n` +
+            `model = "${model}"\n\n` +
+            `[model_providers.osante]\n` +
+            `name = "Osante Proxy"\n` +
+            `base_url = "${proxyBase}/v1"\n` +
+            `wire_api = "responses"\n` +
+            `requires_openai_auth = true`;
+
+        const codexAuth = `{ "OPENAI_API_KEY": "stub" }`;
+
+        const modalContainer = document.getElementById('modal-container');
+        modalContainer.innerHTML = `
+            <div class="modal-overlay">
+                <div class="modal" style="max-width: 760px; width: 95vw;">
+                    <div class="modal-header">
+                        <h3 class="modal-title">${t('endpoints.copyConfigTitle')}: ${this.escapeHtml(endpointName)}</h3>
+                        <button class="modal-close" id="close-modal">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="text-muted" style="margin-top:0;">${t('endpoints.copyConfigHint')}</p>
+
+                        <div class="form-group">
+                            <label class="form-label">Claude Code — environment</label>
+                            <div style="position:relative;">
+                                <pre id="copy-config-claude" class="code-block" style="white-space:pre; overflow-x:auto;"></pre>
+                                <button class="btn btn-sm btn-secondary" id="copy-config-claude-btn" style="position:absolute; top:8px; right:8px;">${t('common.copy')}</button>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label">Codex CLI — ~/.codex/config.toml</label>
+                            <div style="position:relative;">
+                                <pre id="copy-config-codex" class="code-block" style="white-space:pre; overflow-x:auto;"></pre>
+                                <button class="btn btn-sm btn-secondary" id="copy-config-codex-btn" style="position:absolute; top:8px; right:8px;">${t('common.copy')}</button>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label">Codex CLI — ~/.codex/auth.json</label>
+                            <div style="position:relative;">
+                                <pre id="copy-config-auth" class="code-block" style="white-space:pre; overflow-x:auto;"></pre>
+                                <button class="btn btn-sm btn-secondary" id="copy-config-auth-btn" style="position:absolute; top:8px; right:8px;">${t('common.copy')}</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-secondary" id="copy-config-close-btn">${t('common.close')}</button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Set code contents via textContent — never inject snippets as innerHTML
+        // even though they're synthesized server-side-of-UI; defence-in-depth.
+        document.getElementById('copy-config-claude').textContent = claudeEnv;
+        document.getElementById('copy-config-codex').textContent = codexToml;
+        document.getElementById('copy-config-auth').textContent = codexAuth;
+
+        const wireCopy = (btnId, text) => {
+            const btn = document.getElementById(btnId);
+            btn.addEventListener('click', () => {
+                navigator.clipboard.writeText(text).then(() => {
+                    const original = btn.textContent;
+                    btn.textContent = '✓';
+                    notifications.success(t('endpoints.configCopied'));
+                    setTimeout(() => { btn.textContent = original; }, 1000);
+                }).catch(() => notifications.error(t('endpoints.failedToCopy')));
+            });
+        };
+        wireCopy('copy-config-claude-btn', claudeEnv);
+        wireCopy('copy-config-codex-btn', codexToml);
+        wireCopy('copy-config-auth-btn', codexAuth);
+
+        document.getElementById('close-modal').addEventListener('click', () => this.closeModal());
+        document.getElementById('copy-config-close-btn').addEventListener('click', () => this.closeModal());
     }
 
     getTestStatus(endpointName) {
@@ -553,7 +687,7 @@ class Endpoints {
 
         // Create a second modal overlay
         const modelModal = document.createElement('div');
-        modelModal.className = 'modal-overlay';
+        modelModal.className = 'modal-overlay no-overlay-dismiss';
         modelModal.style.zIndex = '1001';
         modelModal.innerHTML = `
             <div class="modal" style="max-width: 500px;">
@@ -564,7 +698,7 @@ class Endpoints {
                 <div class="modal-body">
                     <div style="max-height: 400px; overflow-y: auto;">
                         ${models.map(model => `
-                            <div class="model-item" style="padding: 10px; border-bottom: 1px solid #e5e7eb; cursor: pointer;" data-model="${this.escapeHtml(model)}">
+                            <div class="model-item" data-model="${this.escapeHtml(model)}">
                                 <strong>${this.escapeHtml(model)}</strong>
                             </div>
                         `).join('')}
@@ -596,11 +730,11 @@ class Endpoints {
             });
 
             item.addEventListener('mouseenter', () => {
-                item.style.backgroundColor = '#f3f4f6';
+                item.classList.add('is-hover');
             });
 
             item.addEventListener('mouseleave', () => {
-                item.style.backgroundColor = '';
+                item.classList.remove('is-hover');
             });
         });
     }
@@ -772,7 +906,7 @@ class Endpoints {
 
             modalContainer.innerHTML = `
                 <div class="modal-overlay">
-                    <div class="modal" style="max-width: 960px; width: 95vw;">
+                    <div class="modal" style="max-width: 1200px; width: 95vw;">
                         <div class="modal-header">
                             <h3 class="modal-title">${t('endpoints.tokenPoolTitle')} ${this.escapeHtml(endpointName)}</h3>
                             <button class="modal-close" id="close-modal">×</button>
@@ -973,17 +1107,19 @@ class Endpoints {
 
     renderCredentialStatusBadge(status) {
         const normalized = status || 'unknown';
-        const colorMap = {
-            active: '#10b981',
-            expiring: '#f59e0b',
-            need_refresh: '#f97316',
-            expired: '#ef4444',
-            invalid: '#ef4444',
-            cooldown: '#6366f1',
-            disabled: '#6b7280'
+        // Map credential states onto the terminal badge palette so the modal
+        // matches the rest of the UI. All variants reuse the .badge baseline.
+        const variantMap = {
+            active:       'badge-success',
+            expiring:     'badge-warning',
+            need_refresh: 'badge-warning',
+            expired:      'badge-danger',
+            invalid:      'badge-danger',
+            cooldown:     'badge-info',
+            disabled:     'badge-neutral',
         };
-        const color = colorMap[normalized] || '#6b7280';
-        return `<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:${color};color:#fff;font-size:12px;">${this.escapeHtml(normalized)}</span>`;
+        const variant = variantMap[normalized] || 'badge-neutral';
+        return `<span class="badge ${variant}">${this.escapeHtml(normalized)}</span>`;
     }
 
     // Appends one empty token-entry row (token + optional label) to the simple

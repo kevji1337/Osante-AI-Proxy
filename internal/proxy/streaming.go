@@ -81,11 +81,11 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 	for scanner.Scan() && !streamDone {
 		line := scanner.Text()
 
-		if !p.isCurrentEndpoint(endpoint.Name) {
-			logger.Warn("[%s] Endpoint switched during streaming, terminating stream gracefully", endpoint.Name)
-			streamDone = true
-			break
-		}
+		// Once we've started streaming a 200 OK response back to the client we
+		// commit to finishing it, even if a parallel request rotates the
+		// global currentIndex or a manual /api/endpoints/switch happens.
+		// Future requests will pick up the new endpoint via that index — there
+		// is no benefit to truncating an already-in-flight upstream stream.
 
 		if strings.Contains(line, "data: [DONE]") {
 			streamDone = true
@@ -161,8 +161,7 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 				p.extractTextFromEvent(transformedEvent, &outputText)
 
 				if _, writeErr := w.Write(transformedEvent); writeErr != nil {
-					// Client disconnected (broken pipe) is normal for cancelled requests
-					if strings.Contains(writeErr.Error(), "broken pipe") || strings.Contains(writeErr.Error(), "connection reset") {
+					if isClientDisconnectError(writeErr) {
 						logger.Debug("[%s] Client disconnected: %v", endpoint.Name, writeErr)
 					} else {
 						logger.Error("[%s] Failed to write transformed event: %v", endpoint.Name, writeErr)

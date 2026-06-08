@@ -255,12 +255,16 @@ func (p *Proxy) storeCredentialRateLimits(credentialID int64, data *storage.Code
 	return p.storage.UpsertCredentialRateLimits(credentialID, data, status, errMsg, time.Now().UTC())
 }
 
-func codexRateLimitHTTPClient() *http.Client {
+// defaultCodexRateLimitHTTPClient returns the bare HTTP client used for
+// rate-limit fetches when the call site doesn't have a *Proxy in scope (no
+// per-instance proxy config, no upstream Transport reuse). Prefer the
+// (p *Proxy).codexRateLimitHTTPClient method when you do have *Proxy.
+func defaultCodexRateLimitHTTPClient() *http.Client {
 	return &http.Client{Timeout: codexRateLimitTimeout}
 }
 
 func (p *Proxy) codexRateLimitHTTPClient() *http.Client {
-	client := codexRateLimitHTTPClient()
+	client := defaultCodexRateLimitHTTPClient()
 	if p != nil && p.httpClient != nil {
 		client.Transport = p.httpClient.Transport
 	}

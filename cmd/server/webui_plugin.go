@@ -3,10 +3,10 @@ package main
 import (
 	"net/http"
 
+	"github.com/kevji1337/Osante-AI-Proxy/cmd/server/webui"
 	"github.com/kevji1337/Osante-AI-Proxy/internal/config"
 	"github.com/kevji1337/Osante-AI-Proxy/internal/proxy"
 	"github.com/kevji1337/Osante-AI-Proxy/internal/storage"
-	"github.com/kevji1337/Osante-AI-Proxy/cmd/server/webui"
 )
 
 // registerWebUI registers the Web UI routes

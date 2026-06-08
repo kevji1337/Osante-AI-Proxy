@@ -24,6 +24,31 @@ func shouldRetry(statusCode int) bool {
 		statusCode != http.StatusUnauthorized
 }
 
+// isClientDisconnectError reports whether a write/read error against the
+// client connection is a normal client-side disconnect rather than something
+// the server did wrong. Without this the proxy logs ERROR for every cancelled
+// request — especially noisy on Windows where the OS surfaces resets as
+// "wsasend: An existing connection was forcibly closed by the remote host"
+// instead of the POSIX-style "broken pipe" / "connection reset".
+func isClientDisconnectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "broken pipe"),
+		strings.Contains(msg, "connection reset"),
+		strings.Contains(msg, "forcibly closed by the remote host"),
+		strings.Contains(msg, "wsasend"),
+		strings.Contains(msg, "wsarecv"),
+		strings.Contains(msg, "use of closed network connection"),
+		strings.Contains(msg, "context canceled"),
+		strings.Contains(msg, "client disconnected"):
+		return true
+	}
+	return false
+}
+
 // isGatewayNotFoundNoise reports whether a 404 response body looks like a
 // generic gateway/reverse-proxy "not found" string rather than a real upstream
 // API error. These show up when health checks, /v1/models probes, or other

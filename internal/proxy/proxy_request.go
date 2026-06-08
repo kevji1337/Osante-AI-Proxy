@@ -1,7 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -29,6 +32,7 @@ type proxyRequestContext struct {
 	lastUpstreamStatus          int
 	lastUpstreamBody            []byte
 	lastUpstreamHeader          http.Header
+	trace                       *TraceHandle
 }
 
 type endpointAttempt struct {
@@ -59,6 +63,11 @@ func (p *Proxy) handleProxyRequest(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	defer func() {
+		// Trace finalize must run regardless of how the request loop exits.
+		// nil-safe on purpose — if tracing was disabled, this is a no-op.
+		reqCtx.trace.Finalize()
+	}()
 
 	maxRetries := p.computeMaxRetries(reqCtx.endpoints)
 	endpointAttempts := 0
@@ -137,6 +146,29 @@ func (p *Proxy) newProxyRequestContext(w http.ResponseWriter, r *http.Request) (
 	logger.DebugLog("Method: %s, Path: %s, ClientFormat: %s", r.Method, r.URL.Path, clientFormat)
 	logger.DebugLog("Request Body: %s", string(bodyBytes))
 
+	// Reject anything that can't be a real LLM request before we burn an
+	// attempt against every endpoint. The proxy "/" route only handles POST
+	// /v1/messages-style traffic; HEAD/GET/OPTIONS probes (Cloudflare health
+	// checks, browser preflights, broken clients), empty bodies, and
+	// non-JSON content types all reach transformers as `unexpected end of
+	// JSON input` and spam ERROR once per endpoint per token. Catch them at
+	// the boundary instead.
+	if r.Method != http.MethodPost {
+		logger.Debug("Rejecting non-POST %s to %s", r.Method, r.URL.Path)
+		writeInvalidRequestError(w, "method not allowed")
+		return nil, errInvalidProxyRequest
+	}
+	if len(bytes.TrimSpace(bodyBytes)) == 0 {
+		logger.Debug("Rejecting empty-body POST to %s", r.URL.Path)
+		writeInvalidRequestError(w, "request body is empty")
+		return nil, errInvalidProxyRequest
+	}
+	if !looksLikeJSONBody(bodyBytes) {
+		logger.Debug("Rejecting non-JSON POST to %s (content-type=%q)", r.URL.Path, r.Header.Get("Content-Type"))
+		writeInvalidRequestError(w, "request body is not JSON")
+		return nil, errInvalidProxyRequest
+	}
+
 	var streamReq struct {
 		Model  string `json:"model"`
 		Stream bool   `json:"stream"`
@@ -162,6 +194,11 @@ func (p *Proxy) newProxyRequestContext(w http.ResponseWriter, r *http.Request) (
 		logger.Debug("[Resolver] using specified endpoint: %s", specifiedEndpoint.Name)
 	}
 
+	trace := p.beginTrace()
+	trace.Mark(PhaseReceived)
+	trace.SetMeta(r.Method, r.URL.Path, string(clientFormat))
+	trace.SetBytes(len(bodyBytes), 0)
+
 	return &proxyRequestContext{
 		httpRequest:                 r,
 		bodyBytes:                   bodyBytes,
@@ -175,6 +212,7 @@ func (p *Proxy) newProxyRequestContext(w http.ResponseWriter, r *http.Request) (
 		modelOverride:               modelOverride,
 		useSpecificEndpoint:         useSpecificEndpoint,
 		refreshedCredentialAttempts: make(map[int64]bool),
+		trace:                       trace,
 	}, nil
 }
 
@@ -199,8 +237,11 @@ func (p *Proxy) runEndpointAttempt(w http.ResponseWriter, reqCtx *proxyRequestCo
 	p.logUpstreamRequest(reqCtx, attempt)
 	resp, err := sendRequest(p.getEndpointContext(attempt.endpoint.Name), attempt.proxyRequest, p.httpClient, p.config)
 	if err != nil {
+		reqCtx.trace.SetError(err.Error())
 		return p.handleSendError(err, attempt)
 	}
+	reqCtx.trace.Mark(PhaseUpstreamSent)
+	reqCtx.trace.SetStatus(resp.StatusCode)
 	attempt.response = resp
 
 	return p.handleAttemptResponse(w, reqCtx, attempt)
@@ -227,6 +268,8 @@ func (p *Proxy) prepareEndpointAttempt(reqCtx *proxyRequestContext, attempt *end
 		p.stats.RecordError(attempt.endpoint.Name)
 		return attemptResultRetryNextEndpoint
 	}
+	reqCtx.trace.Mark(PhaseTransformed)
+	reqCtx.trace.SetEndpoint(attempt.endpoint.Name, attempt.transformerName, attempt.modelName, reqCtx.useSpecificEndpoint)
 
 	logger.DebugLog("[%s] Transformer: %s", attempt.endpoint.Name, attempt.transformerName)
 	logger.DebugLog("[%s] Transformed Request: %s", attempt.endpoint.Name, string(transformedBody))
@@ -272,7 +315,23 @@ func (p *Proxy) resolveAttemptAuth(reqCtx *proxyRequestContext, attempt *endpoin
 			return attemptResultRetryNextEndpoint
 		}
 		if credential == nil || strings.TrimSpace(credential.AccessToken) == "" {
-			logger.Warn("[%s] No usable token in token pool", attempt.endpoint.Name)
+			// Token pool exhausted: every credential is either disabled,
+			// invalid, expired, or in cooldown. Put the *endpoint* itself in
+			// cooldown until the soonest token reactivates so the retry loop
+			// stops thrashing it on every request. Dedup the log line so
+			// concurrent in-flight requests don't each print one.
+			now := time.Now().UTC()
+			until, cdErr := p.earliestTokenCooldown(attempt.endpoint.Name, now)
+			if cdErr == nil && !until.IsZero() {
+				p.setEndpointCooldown(attempt.endpoint.Name, until, "Token pool exhausted")
+			}
+			if p.shouldLogDedup("no_usable_token|"+attempt.endpoint.Name, 30*time.Second) {
+				if !until.IsZero() {
+					logger.Warn("[%s] No usable token in token pool — endpoint cooled down until %s", attempt.endpoint.Name, until.Format(time.RFC3339))
+				} else {
+					logger.Warn("[%s] No usable token in token pool", attempt.endpoint.Name)
+				}
+			}
 			p.stats.RecordError(attempt.endpoint.Name)
 			return attemptResultRetryNextEndpoint
 		}
@@ -319,13 +378,16 @@ func (p *Proxy) logUpstreamRequest(reqCtx *proxyRequestContext, attempt *endpoin
 }
 
 func (p *Proxy) handleSendError(err error, attempt *endpointAttempt) attemptResult {
-	logger.Error("[%s] Request failed: %v", attempt.endpoint.Name, err)
 	p.markRequestInactive(attempt.endpoint.Name)
 	if isTransientNetworkError(err) {
+		// Transient: a single WARN explains what happened and that we're
+		// retrying. Logging an ERROR on top of that for the same event
+		// double-counts the failure in the log feed.
 		logger.Warn("[%s] Transient network error, retrying same endpoint: %v", attempt.endpoint.Name, err)
 		time.Sleep(300 * time.Millisecond)
 		return attemptResultRetrySameEndpoint
 	}
+	logger.Error("[%s] Request failed: %v", attempt.endpoint.Name, err)
 	p.markCredentialFailure(attempt.credentialID, 0, err.Error())
 	p.recordCredentialUsage(attempt.credentialID, attempt.endpoint.Name, 0, 1, 0, 0)
 	p.recordEndpointError(attempt.endpoint.Name, truncateString(err.Error(), 200))
@@ -402,7 +464,9 @@ func (p *Proxy) handlePaymentRequired(reqCtx *proxyRequestContext, attempt *endp
 				logger.Warn("[%s] Failed to set token usage-limit cooldown (id=%d): %v", attempt.endpoint.Name, attempt.credentialID, err)
 			}
 		}
-		logger.Info("Endpoint %s token (id=%d) hit usage limit, switching to next token", attempt.endpoint.Name, attempt.credentialID)
+		if p.shouldLogUsageLimit(attempt.endpoint.Name, attempt.credentialID) {
+			logger.Info("Endpoint %s token (id=%d) hit usage limit, switching to next token", attempt.endpoint.Name, attempt.credentialID)
+		}
 		logger.Debug("[%s] Token id=%d usage limit cooldown until %s: %s", attempt.endpoint.Name, attempt.credentialID, until.Format(time.RFC3339), errMsg)
 
 		p.recordEndpointError(attempt.endpoint.Name, errMsg)
@@ -459,6 +523,15 @@ func (p *Proxy) finishSuccessfulAttempt(reqCtx *proxyRequestContext, attempt *en
 	}
 	totalElapsed := time.Since(reqCtx.requestStart).Round(time.Millisecond)
 	logger.Debug("[%s] Requested tokens=%d/%d latency=%s cred_id=%d", attempt.endpoint.Name, inputTokens, outputTokens, totalElapsed, attempt.credentialID)
+
+	// Trace: record outcome. PhaseClientSent is approximate — we marked
+	// PhaseUpstreamSent earlier and the whole streaming body has been
+	// proxied by the time we land here.
+	reqCtx.trace.Mark(PhaseClientSent)
+	reqCtx.trace.SetTokens(inputTokens, outputTokens)
+	reqCtx.trace.SetBytes(len(reqCtx.bodyBytes), len(outputText))
+	reqCtx.trace.SetStreaming(reqCtx.streamRequested)
+	reqCtx.trace.SetStatus(http.StatusOK)
 }
 
 func (p *Proxy) handleRetryableStatus(resp *http.Response, attempt *endpointAttempt) attemptResult {
@@ -469,7 +542,10 @@ func (p *Proxy) handleRetryableStatus(resp *http.Response, attempt *endpointAtte
 	// keep them at DEBUG. Real API errors (JSON bodies) stay at WARN.
 	if resp.StatusCode == http.StatusNotFound && isGatewayNotFoundNoise(errMsg) {
 		logger.Debug("[%s] Upstream 404 (gateway probe): %s", attempt.endpoint.Name, errMsg)
-	} else {
+	} else if p.shouldLogDedup(fmt.Sprintf("retryable|%s|%d", attempt.endpoint.Name, resp.StatusCode), 10*time.Second) {
+		// Dedup transient-but-non-cooldown failures (Cloudflare 502/503/504,
+		// upstream 429) so a burst of parallel retries on the same dead
+		// upstream doesn't spam the log feed.
 		logger.Warn("[%s] Request failed %d: %s", attempt.endpoint.Name, resp.StatusCode, errMsg)
 	}
 	logger.DebugLog("[%s] Request failed %d: %s", attempt.endpoint.Name, resp.StatusCode, errMsg)
@@ -624,4 +700,21 @@ func truncateString(value string, max int) string {
 	return value[:max] + "..."
 }
 
-var errNoEnabledEndpoints = io.EOF
+var errNoEnabledEndpoints = errors.New("no enabled endpoints configured")
+var errInvalidProxyRequest = errors.New("invalid proxy request")
+
+// looksLikeJSONBody is a cheap pre-check: a real LLM request body is always a
+// JSON object — first non-whitespace byte must be `{` (or `[`, for the few
+// providers that allow array roots). Anything else (HTML error pages,
+// form-encoded, plain text probes) is rejected before transformers see it.
+func looksLikeJSONBody(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return false
+	}
+	switch trimmed[0] {
+	case '{', '[':
+		return true
+	}
+	return false
+}

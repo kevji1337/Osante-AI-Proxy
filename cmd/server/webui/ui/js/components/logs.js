@@ -3,14 +3,47 @@ import { state } from '../state.js';
 import { notifications } from '../utils/notifications.js';
 import { t } from '../utils/i18n.js';
 
+const PREFS_KEY = 'logs.prefs';
+
+// Stored filter prefs survive reloads and tab switches so the user doesn't
+// have to re-pick DEBUG / type the same search every time.
+function loadPrefs() {
+    try {
+        const raw = localStorage.getItem(PREFS_KEY);
+        if (!raw) return null;
+        const p = JSON.parse(raw);
+        return (p && typeof p === 'object') ? p : null;
+    } catch {
+        return null;
+    }
+}
+
+function savePrefs(prefs) {
+    try {
+        localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+    } catch {
+        // Ignore quota / privacy-mode errors.
+    }
+}
+
 class Logs {
     constructor() {
         this.container = document.getElementById('view-container');
         this.entries = [];
-        this.level = 'INFO';
-        this.search = '';
-        this.autoRefresh = true;
+
+        const prefs = loadPrefs() || {};
+        const validLevels = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
+        this.level = validLevels.includes(prefs.level) ? prefs.level : 'INFO';
+        this.search = typeof prefs.search === 'string' ? prefs.search : '';
+        this.autoRefresh = prefs.autoRefresh !== undefined ? !!prefs.autoRefresh : true;
+        this.followTail = prefs.followTail !== undefined ? !!prefs.followTail : true;
         this.refreshTimer = null;
+        // EventSource for the SSE tail. Opened on render(), closed when the
+        // view unmounts or auto-refresh is disabled.
+        this.sse = null;
+        // Cap on rendered entries so a very long-running view doesn't keep
+        // accumulating DOM nodes forever (the backend ring is 1000).
+        this.maxEntries = 1000;
 
         window.addEventListener('languageChanged', () => {
             if (state.get('currentView') === 'logs') {
@@ -19,17 +52,31 @@ class Logs {
         });
     }
 
+    persistPrefs() {
+        savePrefs({
+            level: this.level,
+            search: this.search,
+            autoRefresh: this.autoRefresh,
+            followTail: this.followTail,
+        });
+    }
+
     async render() {
         this.container.innerHTML = `
             <div class="view">
                 <div class="view-header">
-                    <h2>${t('logs.title')}</h2>
+                    <div class="term-meta">
+                        <span class="term-meta-key">STREAM</span><span class="term-meta-sep">/</span><span class="term-meta-val">/api/logs</span>
+                        <span class="term-meta-sep">·</span>
+                        <span class="term-meta-key">RING</span><span class="term-meta-sep">/</span><span class="term-meta-val">1000</span>
+                    </div>
+                    <h1>${t('logs.title')}</h1>
                 </div>
 
-                <div class="toolbar" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
-                    <label>
-                        ${t('logs.level')}:
-                        <select class="form-select" id="logs-level" style="display:inline-block; width:auto; margin-left:6px;">
+                <div class="logs-toolbar">
+                    <label class="logs-toolbar-field">
+                        <span>${t('logs.level')}</span>
+                        <select class="form-select" id="logs-level">
                             <option value="DEBUG" ${this.level === 'DEBUG' ? 'selected' : ''}>DEBUG</option>
                             <option value="INFO"  ${this.level === 'INFO'  ? 'selected' : ''}>INFO</option>
                             <option value="WARN"  ${this.level === 'WARN'  ? 'selected' : ''}>WARN</option>
@@ -37,42 +84,52 @@ class Logs {
                         </select>
                     </label>
 
-                    <input type="text" class="form-input" id="logs-search"
+                    <input type="text" class="form-input logs-search" id="logs-search"
                            placeholder="${t('logs.searchPlaceholder')}"
-                           value="${this.escapeHtml(this.search)}"
-                           style="flex:1; min-width:200px;">
+                           value="${this.escapeHtml(this.search)}">
 
-                    <label style="display:inline-flex; gap:6px; align-items:center;">
+                    <label class="logs-toolbar-check">
                         <input type="checkbox" id="logs-autorefresh" ${this.autoRefresh ? 'checked' : ''}>
                         ${t('logs.autoRefresh')}
+                    </label>
+
+                    <label class="logs-toolbar-check">
+                        <input type="checkbox" id="logs-follow-tail" ${this.followTail ? 'checked' : ''}>
+                        ${t('logs.followTail')}
                     </label>
 
                     <button class="btn btn-secondary" id="logs-refresh">${t('common.refresh')}</button>
                 </div>
 
-                <div id="logs-output" style="
-                    background:#0f172a; color:#e2e8f0;
-                    font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
-                    font-size:12px; line-height:1.5;
-                    border-radius:8px; padding:12px;
-                    max-height: calc(100vh - 220px);
-                    overflow-y:auto;
-                    white-space:pre-wrap; word-break:break-word;">
-                </div>
+                <div id="logs-output" class="logs-output"></div>
             </div>
         `;
 
         document.getElementById('logs-level').addEventListener('change', e => {
             this.level = e.target.value;
+            this.persistPrefs();
+            // Re-pull the ring at the new level, then re-subscribe so the
+            // SSE stream filters server-side.
             this.fetchAndRender();
+            this.toggleAutoRefresh();
         });
         document.getElementById('logs-search').addEventListener('input', e => {
             this.search = e.target.value;
+            this.persistPrefs();
             this.renderEntries();
         });
         document.getElementById('logs-autorefresh').addEventListener('change', e => {
             this.autoRefresh = e.target.checked;
+            this.persistPrefs();
             this.toggleAutoRefresh();
+        });
+        document.getElementById('logs-follow-tail').addEventListener('change', e => {
+            this.followTail = e.target.checked;
+            this.persistPrefs();
+            if (this.followTail) {
+                const out = document.getElementById('logs-output');
+                if (out) out.scrollTop = out.scrollHeight;
+            }
         });
         document.getElementById('logs-refresh').addEventListener('click', () => this.fetchAndRender());
 
@@ -81,19 +138,58 @@ class Logs {
     }
 
     toggleAutoRefresh() {
+        // Tear down whatever stream we previously had open.
+        this.closeStream();
         if (this.refreshTimer) {
             clearInterval(this.refreshTimer);
             this.refreshTimer = null;
         }
         if (!this.autoRefresh) return;
-        this.refreshTimer = setInterval(() => {
-            if (state.get('currentView') !== 'logs') {
-                clearInterval(this.refreshTimer);
-                this.refreshTimer = null;
-                return;
-            }
-            this.fetchAndRender(true);
-        }, 3000);
+
+        // Open an SSE tail. The server filters by level so we don't ship
+        // entries the user isn't watching, and the connection is held open
+        // for the lifetime of the view.
+        try {
+            const url = `/api/logs/stream?level=${encodeURIComponent(this.level)}`;
+            this.sse = new EventSource(url);
+            this.sse.onmessage = (event) => {
+                if (state.get('currentView') !== 'logs') {
+                    this.closeStream();
+                    return;
+                }
+                try {
+                    const entry = JSON.parse(event.data);
+                    this.entries.push(entry);
+                    if (this.entries.length > this.maxEntries) {
+                        this.entries = this.entries.slice(-this.maxEntries);
+                    }
+                    this.renderEntries();
+                } catch (e) {
+                    // Malformed entry — skip, don't take the stream down.
+                }
+            };
+            this.sse.onerror = () => {
+                // Browser auto-reconnects after a short delay; nothing to do.
+            };
+        } catch (e) {
+            // Fall back to polling if EventSource isn't available — keep
+            // the dashboard usable on exotic browsers.
+            this.refreshTimer = setInterval(() => {
+                if (state.get('currentView') !== 'logs') {
+                    clearInterval(this.refreshTimer);
+                    this.refreshTimer = null;
+                    return;
+                }
+                this.fetchAndRender(true);
+            }, 3000);
+        }
+    }
+
+    closeStream() {
+        if (this.sse) {
+            try { this.sse.close(); } catch (_) {}
+            this.sse = null;
+        }
     }
 
     async fetchAndRender(silent = false) {
@@ -107,8 +203,8 @@ class Logs {
     }
 
     // Renders the current entries into the output panel, applying the search
-    // filter and color-coding by level. Auto-scrolls to the bottom if the user
-    // was already at the bottom (typical "tail -f" feel).
+    // filter and color-coding by level via CSS classes (no inline styles —
+    // colors come from the terminal palette in components.css).
     renderEntries() {
         const out = document.getElementById('logs-output');
         if (!out) return;
@@ -118,27 +214,22 @@ class Logs {
             ? this.entries.filter(e => e.message.toLowerCase().includes(search))
             : this.entries;
 
-        const colorByLevel = {
-            DEBUG: '#94a3b8',
-            INFO:  '#60a5fa',
-            WARN:  '#fbbf24',
-            ERROR: '#f87171',
-        };
-
         const wasAtBottom = (out.scrollHeight - out.scrollTop - out.clientHeight) < 20;
 
         out.innerHTML = filtered.length === 0
-            ? `<span style="color:#94a3b8;">${t('logs.empty')}</span>`
+            ? `<span class="logs-empty">${this.escapeHtml(t('logs.empty'))}</span>`
             : filtered.map(e => {
                 const lvl = (e.levelStr || '').toUpperCase();
-                const color = colorByLevel[lvl] || '#e2e8f0';
+                const lvlClass = ['DEBUG', 'INFO', 'WARN', 'ERROR'].includes(lvl) ? lvl.toLowerCase() : 'info';
                 const ts = this.formatTimestamp(e.timestamp);
-                return `<div><span style="color:#64748b;">${this.escapeHtml(ts)}</span> `
-                    + `<span style="color:${color}; font-weight:600;">${this.escapeHtml(lvl.padEnd(5))}</span> `
-                    + `<span>${this.escapeHtml(e.message)}</span></div>`;
+                return `<div class="log-line log-line-${lvlClass}">`
+                    + `<span class="log-ts">${this.escapeHtml(ts)}</span> `
+                    + `<span class="log-lvl">${this.escapeHtml(lvl.padEnd(5))}</span> `
+                    + `<span class="log-msg">${this.escapeHtml(e.message)}</span>`
+                    + `</div>`;
             }).join('');
 
-        if (wasAtBottom) out.scrollTop = out.scrollHeight;
+        if (this.followTail || wasAtBottom) out.scrollTop = out.scrollHeight;
     }
 
     formatTimestamp(iso) {

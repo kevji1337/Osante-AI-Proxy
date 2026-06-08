@@ -49,56 +49,67 @@ func prepareTransformerForClient(clientFormat ClientFormat, endpoint config.Endp
 	return nil, fmt.Errorf("unsupported client format: %s", clientFormat)
 }
 
+// transformerFactory maps an endpoint-transformer name ("claude", "openai",
+// "openai2", "gemini") to a constructor that produces a transformer.Transformer
+// for one specific client format (cc / cx-chat / cx-resp). The structure lets
+// the three prepare*Transformer wrappers share a single switch and error path.
+type transformerFactory map[string]func(effectiveModel string) transformer.Transformer
+
+// ccFactory builds Claude Code (`cc_*`) client-side transformers.
+//
+// cc_claude is special-cased: a missing effectiveModel means "pass through
+// the original model" and is the documented happy path, so the wrapper
+// distinguishes it from the model-override variant.
+var ccFactory = transformerFactory{
+	"claude": func(effectiveModel string) transformer.Transformer {
+		if effectiveModel != "" {
+			return cc.NewClaudeTransformerWithModel(effectiveModel)
+		}
+		return cc.NewClaudeTransformer()
+	},
+	"openai":  func(m string) transformer.Transformer { return cc.NewOpenAITransformer(m) },
+	"openai2": func(m string) transformer.Transformer { return cc.NewOpenAI2Transformer(m) },
+	"gemini":  func(m string) transformer.Transformer { return cc.NewGeminiTransformer(m) },
+}
+
+var cxChatFactory = transformerFactory{
+	"claude":  func(m string) transformer.Transformer { return chat.NewClaudeTransformer(m) },
+	"openai":  func(m string) transformer.Transformer { return chat.NewOpenAITransformer(m) },
+	"openai2": func(m string) transformer.Transformer { return chat.NewOpenAI2Transformer(m) },
+	"gemini":  func(m string) transformer.Transformer { return chat.NewGeminiTransformer(m) },
+}
+
+var cxRespFactory = transformerFactory{
+	"claude":  func(m string) transformer.Transformer { return responses.NewClaudeTransformer(m) },
+	"openai":  func(m string) transformer.Transformer { return responses.NewOpenAITransformer(m) },
+	"openai2": func(m string) transformer.Transformer { return responses.NewOpenAI2Transformer(m) },
+	"gemini":  func(m string) transformer.Transformer { return responses.NewGeminiTransformer(m) },
+}
+
+func buildFromFactory(f transformerFactory, label string, endpoint config.Endpoint, endpointTransformer string, effectiveModel string) (transformer.Transformer, error) {
+	build, ok := f[endpointTransformer]
+	if !ok {
+		return nil, fmt.Errorf("unsupported endpoint transformer for %s: %s", label, endpointTransformer)
+	}
+	if endpointTransformer == "claude" && label == "cc" && effectiveModel != "" {
+		logger.Debug("[%s] Using cc_claude with model override: %s", endpoint.Name, effectiveModel)
+	}
+	return build(effectiveModel), nil
+}
+
 // prepareCCTransformer creates transformer for Claude Code client
 func prepareCCTransformer(endpoint config.Endpoint, endpointTransformer string, effectiveModel string) (transformer.Transformer, error) {
-	switch endpointTransformer {
-	case "claude":
-		if effectiveModel != "" {
-			logger.Debug("[%s] Using cc_claude with model override: %s", endpoint.Name, effectiveModel)
-			return cc.NewClaudeTransformerWithModel(effectiveModel), nil
-		}
-		return cc.NewClaudeTransformer(), nil
-	case "openai":
-		return cc.NewOpenAITransformer(effectiveModel), nil
-	case "openai2":
-		return cc.NewOpenAI2Transformer(effectiveModel), nil
-	case "gemini":
-		return cc.NewGeminiTransformer(effectiveModel), nil
-	default:
-		return nil, fmt.Errorf("unsupported endpoint transformer: %s", endpointTransformer)
-	}
+	return buildFromFactory(ccFactory, "cc", endpoint, endpointTransformer, effectiveModel)
 }
 
 // prepareCxChatTransformer creates transformer for Codex Chat API client
 func prepareCxChatTransformer(endpoint config.Endpoint, endpointTransformer string, effectiveModel string) (transformer.Transformer, error) {
-	switch endpointTransformer {
-	case "claude":
-		return chat.NewClaudeTransformer(effectiveModel), nil
-	case "openai":
-		return chat.NewOpenAITransformer(effectiveModel), nil
-	case "openai2":
-		return chat.NewOpenAI2Transformer(effectiveModel), nil
-	case "gemini":
-		return chat.NewGeminiTransformer(effectiveModel), nil
-	default:
-		return nil, fmt.Errorf("unsupported endpoint transformer for Codex Chat: %s", endpointTransformer)
-	}
+	return buildFromFactory(cxChatFactory, "Codex Chat", endpoint, endpointTransformer, effectiveModel)
 }
 
 // prepareCxRespTransformer creates transformer for Codex Responses API client
 func prepareCxRespTransformer(endpoint config.Endpoint, endpointTransformer string, effectiveModel string) (transformer.Transformer, error) {
-	switch endpointTransformer {
-	case "claude":
-		return responses.NewClaudeTransformer(effectiveModel), nil
-	case "openai":
-		return responses.NewOpenAITransformer(effectiveModel), nil
-	case "openai2":
-		return responses.NewOpenAI2Transformer(effectiveModel), nil
-	case "gemini":
-		return responses.NewGeminiTransformer(effectiveModel), nil
-	default:
-		return nil, fmt.Errorf("unsupported endpoint transformer for Codex Responses: %s", endpointTransformer)
-	}
+	return buildFromFactory(cxRespFactory, "Codex Responses", endpoint, endpointTransformer, effectiveModel)
 }
 
 // getTargetPath determines the target API path based on transformer name

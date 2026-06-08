@@ -1,43 +1,125 @@
-/* Dark theme */
-body.dark-theme {
-    --primary-color: #60a5fa;
-    --primary-hover: #3b82f6;
-    --success-color: #34d399;
-    --danger-color: #f87171;
-    --warning-color: #fbbf24;
-    --bg-primary: #1f2937;
-    --bg-secondary: #111827;
-    --bg-tertiary: #374151;
-    --text-primary: #f9fafb;
-    --text-secondary: #9ca3af;
-    --border-color: #374151;
-    --shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.3);
-    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+/* ============================================================
+   LIGHT THEME — paper terminal
+   Activated by adding `light-theme` to <body>. Same monospace
+   vocabulary, but ink on warm paper instead of phosphor on glass.
+   ============================================================ */
+
+body.light-theme {
+    --acid:          #1d8a3a;          /* darkened phosphor, readable on paper */
+    --acid-soft:     #156b2c;
+    --acid-glow:     rgba(29, 138, 58, 0.18);
+    --amber:         #a85a14;
+    --magenta:       #b21a7a;
+    --danger:        #b22222;
+    --warning:       #8a6900;
+
+    --primary-color: var(--acid);
+    --primary-hover: var(--acid-soft);
+    --success-color: var(--acid);
+
+    --bg-primary:    #f4efe2;          /* warm paper */
+    --bg-secondary:  #ebe4d2;
+    --bg-tertiary:   #ddd4be;
+    --bg-elevated:   #ffffff;
+
+    --text-primary:  #1c1a14;
+    --text-secondary:#5a574d;
+    --text-dim:      #99948a;
+    --border-color:  #cabf9b;
+    --border-strong: #8a805f;
+
+    --shadow:        0 1px 0 rgba(0,0,0,0.04);
+    --shadow-lg:     0 16px 36px -12px rgba(0,0,0,0.18);
+    --shadow-glow:   0 0 12px var(--acid-glow);
 }
 
-/* Dark theme badge adjustments */
-body.dark-theme .badge-success {
-    background-color: #064e3b;
-    color: #6ee7b7;
+/* Light theme dims the CRT scanlines so paper doesn't look digital */
+body.light-theme::before {
+    background-image: repeating-linear-gradient(
+        0deg,
+        rgba(0,0,0,0.022) 0px,
+        rgba(0,0,0,0.022) 1px,
+        transparent 1px,
+        transparent 4px
+    );
+    mix-blend-mode: multiply;
+    opacity: 0.45;
 }
 
-body.dark-theme .badge-danger {
-    background-color: #7f1d1d;
-    color: #fca5a5;
+body.light-theme::after {
+    background:
+        radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.10) 100%);
 }
 
-body.dark-theme .badge-warning {
-    background-color: #78350f;
-    color: #fcd34d;
+/* Headlines lose the neon glow in print mode */
+body.light-theme h1,
+body.light-theme .stat-value,
+body.light-theme .sidebar-header h1,
+body.light-theme .modal-title,
+body.light-theme .badge-success,
+body.light-theme .nav-link.active,
+body.light-theme .table th {
+    text-shadow: none;
 }
 
-body.dark-theme .badge-info {
-    background-color: #1e3a8a;
-    color: #93c5fd;
+/* Buttons in light mode read better with filled primary */
+body.light-theme .btn-primary {
+    background: var(--acid);
+    color: #fff;
+    border-color: var(--acid);
+    box-shadow: none;
+}
+body.light-theme .btn-primary:hover {
+    background: var(--acid-soft);
+    box-shadow: var(--shadow-glow);
+}
+body.light-theme .btn-primary::before,
+body.light-theme .btn-primary::after { color: rgba(255,255,255,0.5); }
+
+/* Subdue the stat-card diagonal hatch in light mode */
+body.light-theme .stat-card::after {
+    background-image: repeating-linear-gradient(
+        45deg,
+        transparent 0px,
+        transparent 18px,
+        rgba(29,138,58,0.04) 18px,
+        rgba(29,138,58,0.04) 19px
+    );
 }
 
-/* Dark theme code block */
-body.dark-theme .code-block {
-    background-color: #0f172a;
-    color: #cbd5e1;
+/* Active nav link — softer fill on paper */
+body.light-theme .nav-link.active {
+    background: rgba(29, 138, 58, 0.08);
+}
+
+body.light-theme .table tbody tr:hover {
+    background-color: rgba(29, 138, 58, 0.05);
+}
+
+body.light-theme .endpoint-row:hover {
+    background: rgba(29, 138, 58, 0.05);
+}
+
+/* Code block stays dark for contrast (no one wants light-on-light code) */
+body.light-theme .code-block {
+    background-color: #1a1a1a;
+    color: #d8f5d0;
+    border-color: #1a1a1a;
+}
+body.light-theme .code-block::before { color: var(--acid); }
+
+body.light-theme .logs-output {
+    background: #0c100e;
+    color: #d4ead2;
+    border-color: var(--border-strong);
+}
+
+body.light-theme .status-indicator {
+    box-shadow: none;
+}
+
+/* Modal title strip on paper looks cleaner without the heavy dash row */
+body.light-theme .modal::before {
+    background: var(--bg-tertiary);
+    color: var(--text-dim);
 }

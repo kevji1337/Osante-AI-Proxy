@@ -6,6 +6,8 @@ import { t } from '../utils/i18n.js';
 class Stats {
     constructor() {
         this.container = document.getElementById('view-container');
+        this.currentPeriod = 'daily';
+        this.currentData = null;
     }
 
     async render() {
@@ -13,10 +15,11 @@ class Stats {
             <div class="stats">
                 <h1>${t('stats.title')}</h1>
 
-                <div class="flex gap-2 mt-3 mb-3">
+                <div class="flex gap-2 mt-3 mb-3" style="align-items:center; flex-wrap:wrap;">
                     <button class="btn btn-sm btn-primary period-btn active" data-period="daily">${t('stats.daily')}</button>
                     <button class="btn btn-sm btn-secondary period-btn" data-period="weekly">${t('stats.weekly')}</button>
                     <button class="btn btn-sm btn-secondary period-btn" data-period="monthly">${t('stats.monthly')}</button>
+                    <button class="btn btn-sm btn-secondary" id="stats-export-btn" style="margin-left:auto;">${t('stats.exportJson')}</button>
                 </div>
 
                 <div id="stats-content"></div>
@@ -34,6 +37,8 @@ class Stats {
                 this.loadStats(btn.dataset.period);
             });
         });
+
+        document.getElementById('stats-export-btn').addEventListener('click', () => this.exportJson());
 
         await this.loadStats('daily');
     }
@@ -53,7 +58,39 @@ class Stats {
                     break;
             }
 
+            this.currentPeriod = period;
+            this.currentData = data;
             this.renderStats(data);
+        } catch (error) {
+            notifications.error(`${t('stats.failedToLoad')}: ${error.message}`);
+        }
+    }
+
+    // exportJson downloads the currently visible stats payload as a JSON file.
+    // Uses a synthetic <a download> so it works without any backend changes.
+    exportJson() {
+        if (!this.currentData) {
+            notifications.warning(t('stats.noDataAvailable'));
+            return;
+        }
+        try {
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const filename = `osante-stats-${this.currentPeriod}-${stamp}.json`;
+            const payload = {
+                period: this.currentPeriod,
+                exportedAt: new Date().toISOString(),
+                data: this.currentData,
+            };
+            const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            notifications.success(t('stats.exported'));
         } catch (error) {
             notifications.error(`${t('stats.failedToLoad')}: ${error.message}`);
         }

@@ -1,0 +1,36 @@
+# Baseline golangci-lint config.
+# Conservative: enable defaults + a handful of pragmatic linters that have
+# been useful for this code base. Tighten over time.
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck      # missing error checks
+    - govet         # standard go vet checks
+    - ineffassign   # unused assignments
+    - staticcheck   # generic staticcheck (subsumes many older linters)
+    - unused        # unused symbols
+    - gofmt         # formatting
+    - misspell      # spelling
+    - bodyclose     # http.Response.Body must be closed
+    - nolintlint    # malformed //nolint directives
+
+linters-settings:
+  misspell:
+    locale: US
+
+issues:
+  # Don't bury problems in less-than-helpful exclusions; let the team decide.
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  # Generated/test files: relax errcheck — _ = fmt.Println patterns are common.
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - bodyclose

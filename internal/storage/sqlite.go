@@ -11,15 +11,30 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// escapeSQLString escapes single quotes in SQL string literals to prevent injection
-func escapeSQLString(s string) string {
-	return strings.ReplaceAll(s, "'", "''")
+// validateSQLitePath checks that a filesystem path is safe to interpolate into
+// a SQLite admin statement (VACUUM INTO, ATTACH DATABASE) where placeholders
+// are not accepted by the SQL grammar. SQLite single-quote-escaping is still
+// applied to the returned path, but pathologically-shaped inputs (embedded
+// newlines, NULs) are rejected outright rather than escaped.
+func validateSQLitePath(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("path is empty")
+	}
+	if strings.ContainsAny(path, "\x00\n\r") {
+		return "", fmt.Errorf("path contains forbidden characters (NUL or newline)")
+	}
+	return strings.ReplaceAll(path, "'", "''"), nil
 }
 
 // safeConfigKeys lists the app_config keys that are platform-agnostic and safe
 // to back up / restore across machines. Keys not in this list (device_id,
 // terminal_*, backup_local_dir, proxy_url, …) are host-specific and must not
 // be synced.
+//
+// NOTE: webdav_*, backup_*, and update_* keys are retained for compatibility
+// with databases imported from upstream ccNexus, even though the WebDAV /
+// backup / auto-update *features* have been stripped from this fork. They
+// round-trip silently through this list; the UI exposes none of them.
 var safeConfigKeys = []string{
 	// Application settings
 	"port", "logLevel", "language",
@@ -82,149 +97,7 @@ func NewSQLiteStorage(dbPath string) (*SQLiteStorage, error) {
 	return s, nil
 }
 
-func (s *SQLiteStorage) initSchema() error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS endpoints (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		name TEXT UNIQUE NOT NULL,
-		api_url TEXT NOT NULL,
-		api_key TEXT NOT NULL,
-		auth_mode TEXT NOT NULL DEFAULT 'api_key',
-		enabled BOOLEAN DEFAULT TRUE,
-		transformer TEXT DEFAULT 'claude',
-		model TEXT,
-		remark TEXT,
-		sort_order INTEGER DEFAULT 0,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE TABLE IF NOT EXISTS endpoint_credentials (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		endpoint_name TEXT NOT NULL,
-		provider_type TEXT NOT NULL DEFAULT 'codex',
-		account_id TEXT,
-		email TEXT,
-		access_token TEXT NOT NULL,
-		refresh_token TEXT,
-		id_token TEXT,
-		last_refresh DATETIME,
-		expires_at DATETIME,
-		status TEXT NOT NULL DEFAULT 'active',
-		enabled BOOLEAN DEFAULT TRUE,
-		failure_count INTEGER DEFAULT 0,
-		cooldown_until DATETIME,
-		last_checked_at DATETIME,
-		last_used_at DATETIME,
-		last_error TEXT,
-		remark TEXT,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE TABLE IF NOT EXISTS credential_rate_limits (
-		credential_id INTEGER PRIMARY KEY,
-		snapshot_json TEXT,
-		last_status TEXT,
-		last_error TEXT,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE TABLE IF NOT EXISTS credential_usage (
-		credential_id INTEGER PRIMARY KEY,
-		endpoint_name TEXT NOT NULL,
-		requests INTEGER DEFAULT 0,
-		errors INTEGER DEFAULT 0,
-		input_tokens INTEGER DEFAULT 0,
-		output_tokens INTEGER DEFAULT 0,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE TABLE IF NOT EXISTS daily_stats (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		endpoint_name TEXT NOT NULL,
-		date TEXT NOT NULL,
-		requests INTEGER DEFAULT 0,
-		errors INTEGER DEFAULT 0,
-		input_tokens INTEGER DEFAULT 0,
-		output_tokens INTEGER DEFAULT 0,
-		device_id TEXT DEFAULT 'default',
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		UNIQUE(endpoint_name, date, device_id)
-	);
-
-	CREATE TABLE IF NOT EXISTS app_config (
-		key TEXT PRIMARY KEY,
-		value TEXT,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_daily_stats_date ON daily_stats(date);
-	CREATE INDEX IF NOT EXISTS idx_daily_stats_endpoint ON daily_stats(endpoint_name);
-	CREATE INDEX IF NOT EXISTS idx_daily_stats_device ON daily_stats(device_id);
-	CREATE INDEX IF NOT EXISTS idx_endpoint_credentials_endpoint ON endpoint_credentials(endpoint_name);
-	CREATE INDEX IF NOT EXISTS idx_endpoint_credentials_status ON endpoint_credentials(status);
-	CREATE INDEX IF NOT EXISTS idx_endpoint_credentials_expires_at ON endpoint_credentials(expires_at);
-	CREATE INDEX IF NOT EXISTS idx_credential_rate_limits_updated ON credential_rate_limits(updated_at);
-	CREATE INDEX IF NOT EXISTS idx_credential_usage_endpoint ON credential_usage(endpoint_name);
-	`
-
-	if _, err := s.db.Exec(schema); err != nil {
-		return err
-	}
-
-	// Migration: Add sort_order column if it doesn't exist
-	if err := s.migrateSortOrder(); err != nil {
-		return err
-	}
-	if err := s.migrateAuthMode(); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// migrateSortOrder adds the sort_order column to existing databases
-func (s *SQLiteStorage) migrateSortOrder() error {
-	// Check if sort_order column exists
-	var count int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('endpoints') WHERE name='sort_order'`).Scan(&count)
-	if err != nil {
-		return err
-	}
-
-	// If column doesn't exist, add it and set default values
-	if count == 0 {
-		// Add the column
-		if _, err := s.db.Exec(`ALTER TABLE endpoints ADD COLUMN sort_order INTEGER DEFAULT 0`); err != nil {
-			return err
-		}
-
-		// Set sort_order for existing endpoints based on their current ID order
-		if _, err := s.db.Exec(`UPDATE endpoints SET sort_order = id WHERE sort_order = 0`); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (s *SQLiteStorage) migrateAuthMode() error {
-	var count int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('endpoints') WHERE name='auth_mode'`).Scan(&count)
-	if err != nil {
-		return err
-	}
-
-	if count == 0 {
-		if _, err := s.db.Exec(`ALTER TABLE endpoints ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'api_key'`); err != nil {
-			return err
-		}
-	}
-
-	_, err = s.db.Exec(`UPDATE endpoints SET auth_mode='api_key' WHERE auth_mode IS NULL OR auth_mode=''`)
-	return err
-}
+// initSchema, migrateSortOrder, migrateAuthMode live in schema.go.
 
 func (s *SQLiteStorage) GetEndpoints() ([]Endpoint, error) {
 	s.mu.RLock()
@@ -606,14 +479,62 @@ func (s *SQLiteStorage) DeleteMonthlyStats(month string) error {
 	return err
 }
 
+// DeleteAllStats wipes every row from daily_stats and credential_usage. Used
+// by the admin "flush stats" action. Endpoints + credentials are preserved.
+// Returns the number of daily_stats rows deleted (the headline metric).
+func (s *SQLiteStorage) DeleteAllStats() (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.Exec(`DELETE FROM daily_stats`)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := s.db.Exec(`DELETE FROM credential_usage`); err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// ClearAllTokenCooldowns drops cooldown_until on every credential of every
+// endpoint. Use after fixing an upstream — the next request will go straight
+// through instead of waiting for the scheduled reset time.
+func (s *SQLiteStorage) ClearAllTokenCooldowns() (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.Exec(`
+		UPDATE endpoint_credentials
+		SET
+			cooldown_until = NULL,
+			status = CASE
+				WHEN status = 'cooldown' THEN 'active'
+				ELSE status
+			END,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE cooldown_until IS NOT NULL
+	`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // CreateBackupCopy 创建数据库备份副本，只保留安全的 app_config 配置项。
 // 设备特定的配置（device_id、终端设置、本地路径等）会被排除。
 func (s *SQLiteStorage) CreateBackupCopy(backupPath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 使用 VACUUM INTO 创建数据库副本，转义路径中的单引号
-	_, err := s.db.Exec(fmt.Sprintf("VACUUM INTO '%s'", escapeSQLString(backupPath)))
+	// VACUUM INTO doesn't accept placeholders, so the path is interpolated.
+	// validateSQLitePath rejects NULs/newlines and SQL-escapes single quotes.
+	escapedPath, err := validateSQLitePath(backupPath)
+	if err != nil {
+		return fmt.Errorf("invalid backup path: %w", err)
+	}
+	_, err = s.db.Exec(fmt.Sprintf("VACUUM INTO '%s'", escapedPath))
 	if err != nil {
 		return fmt.Errorf("failed to create backup: %w", err)
 	}
@@ -655,8 +576,13 @@ func (s *SQLiteStorage) DetectEndpointConflicts(remoteDBPath string) ([]MergeCon
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Attach remote database, escape path to prevent SQL injection
-	_, err := s.db.Exec(fmt.Sprintf("ATTACH DATABASE '%s' AS remote", escapeSQLString(remoteDBPath)))
+	// ATTACH DATABASE doesn't accept placeholders. validateSQLitePath
+	// rejects NULs/newlines and SQL-escapes single quotes.
+	escapedRemote, err := validateSQLitePath(remoteDBPath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid remote db path: %w", err)
+	}
+	_, err = s.db.Exec(fmt.Sprintf("ATTACH DATABASE '%s' AS remote", escapedRemote))
 	if err != nil {
 		return nil, fmt.Errorf("failed to attach remote database: %w", err)
 	}
@@ -802,8 +728,13 @@ func (s *SQLiteStorage) MergeFromBackup(backupDBPath string, strategy MergeStrat
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 挂载备份数据库，转义路径防止 SQL 注入
-	_, err := s.db.Exec(fmt.Sprintf("ATTACH DATABASE '%s' AS backup", escapeSQLString(backupDBPath)))
+	// ATTACH DATABASE doesn't accept placeholders. validateSQLitePath
+	// rejects NULs/newlines and SQL-escapes single quotes.
+	escapedBackup, err := validateSQLitePath(backupDBPath)
+	if err != nil {
+		return fmt.Errorf("invalid backup db path: %w", err)
+	}
+	_, err = s.db.Exec(fmt.Sprintf("ATTACH DATABASE '%s' AS backup", escapedBackup))
 	if err != nil {
 		return fmt.Errorf("failed to attach backup database: %w", err)
 	}

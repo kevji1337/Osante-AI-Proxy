@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -38,27 +39,37 @@ type Proxy struct {
 	currentIndex      int
 	mu                sync.RWMutex
 	server            *http.Server
-	httpClient        *http.Client                  // Reusable HTTP client with connection pool
-	activeRequests    map[string]bool               // tracks active requests by endpoint name
-	activeRequestsMu  sync.RWMutex                  // protects activeRequests map
-	endpointCtx       map[string]context.Context    // context per endpoint for cancellation
-	endpointCancel    map[string]context.CancelFunc // cancel functions per endpoint
-	ctxMu             sync.RWMutex                  // protects context maps
-	onEndpointSuccess func(endpointName string)     // callback when endpoint request succeeds
-	modelsCache       *ModelsCache                  // Cache for /v1/models endpoint
-	resolver          *EndpointResolver             // resolves the endpoint a client specifically targets
+	httpClient        *http.Client                     // Reusable HTTP client with connection pool
+	activeRequests    map[string]int                   // # in-flight requests per endpoint name (rotateEndpoint waits while > 0)
+	activeRequestsMu  sync.RWMutex                     // protects activeRequests map
+	endpointCtx       map[string]context.Context       // context per endpoint for cancellation
+	endpointCancel    map[string]context.CancelFunc    // cancel functions per endpoint
+	ctxMu             sync.RWMutex                     // protects context maps
+	onEndpointSuccess func(endpointName string)        // callback when endpoint request succeeds
+	modelsCache       *ModelsCache                     // Cache for /v1/models endpoint
+	resolver          *EndpointResolver                // resolves the endpoint a client specifically targets
 	endpointStates    map[string]*endpointRuntimeState // per-endpoint runtime state (cooldown / last error)
-	stateMu           sync.RWMutex                  // protects endpointStates
+	stateMu           sync.RWMutex                     // protects endpointStates
+	usageLimitLogged  map[string]time.Time             // last "hit usage limit" log time per (endpoint, credentialID)
+	usageLimitLogMu   sync.Mutex                       // protects usageLimitLogged
+	startedAt         time.Time                        // process start time (for /health uptime)
+	traceRing         *TraceRing                       // bounded ring of recent request traces for the inspector view
 }
 
 // New creates a new Proxy instance
 func New(cfg *config.Config, statsStorage StatsStorage, sqliteStorage *storage.SQLiteStorage, deviceID string) *Proxy {
 	stats := NewStats(statsStorage, deviceID)
 
-	// Create a reusable HTTP client with connection pool
-	// Enhanced configuration for large SSE streaming and HTTP/2 support
+	// Create a reusable HTTP client with connection pool.
+	// Notes:
+	//   - No top-level Timeout: it would cap the entire request lifetime
+	//     including the streaming body read, which kills long SSE streams
+	//     (multi-minute Claude reasoning). Per-request cancellation is handled
+	//     by the request context returned from getEndpointContext.
+	//   - ResponseHeaderTimeout still bounds how long we wait for the upstream
+	//     to start responding, so a hung connect/handshake can't pin a slot
+	//     forever.
 	httpClient := &http.Client{
-		Timeout: 300 * time.Second,
 		Transport: &http.Transport{
 			MaxIdleConns:           100,
 			MaxIdleConnsPerHost:    10,
@@ -73,18 +84,52 @@ func New(cfg *config.Config, statsStorage StatsStorage, sqliteStorage *storage.S
 	}
 
 	return &Proxy{
-		config:         cfg,
-		storage:        sqliteStorage,
-		stats:          stats,
-		currentIndex:   0,
-		httpClient:     httpClient,
-		activeRequests: make(map[string]bool),
-		endpointCtx:    make(map[string]context.Context),
-		endpointCancel: make(map[string]context.CancelFunc),
-		modelsCache:    NewModelsCache(cfg.ModelsCacheTTL),
-		resolver:          NewEndpointResolverWithFunc(cfg.GetEndpoints),
-		endpointStates:    make(map[string]*endpointRuntimeState),
+		config:           cfg,
+		storage:          sqliteStorage,
+		stats:            stats,
+		currentIndex:     0,
+		httpClient:       httpClient,
+		activeRequests:   make(map[string]int),
+		endpointCtx:      make(map[string]context.Context),
+		endpointCancel:   make(map[string]context.CancelFunc),
+		modelsCache:      NewModelsCache(cfg.ModelsCacheTTL),
+		resolver:         NewEndpointResolverWithFunc(cfg.GetEndpoints),
+		endpointStates:   make(map[string]*endpointRuntimeState),
+		usageLimitLogged: make(map[string]time.Time),
+		startedAt:        time.Now().UTC(),
+		traceRing:        NewTraceRing(64),
 	}
+}
+
+// shouldLogUsageLimit reports whether to emit the per-token "hit usage limit"
+// log line for the given (endpoint, credentialID) pair. Concurrent in-flight
+// requests racing the same token would otherwise log identical lines once per
+// goroutine; we collapse them to one line per 10s window.
+func (p *Proxy) shouldLogUsageLimit(endpointName string, credentialID int64) bool {
+	return p.shouldLogDedup(fmt.Sprintf("usage_limit|%s|%d", endpointName, credentialID), 10*time.Second)
+}
+
+// shouldLogDedup is a generic rate-limit for log lines that would otherwise
+// fire once per goroutine when many parallel requests hit the same upstream
+// condition (token-pool exhausted, upstream 502, etc). The same map+mutex is
+// shared with shouldLogUsageLimit; keys are namespaced per caller.
+func (p *Proxy) shouldLogDedup(key string, window time.Duration) bool {
+	now := time.Now()
+	p.usageLimitLogMu.Lock()
+	defer p.usageLimitLogMu.Unlock()
+	if last, ok := p.usageLimitLogged[key]; ok && now.Sub(last) < window {
+		return false
+	}
+	p.usageLimitLogged[key] = now
+	// Cheap GC pass to keep the map bounded.
+	if len(p.usageLimitLogged) > 256 {
+		for k, t := range p.usageLimitLogged {
+			if now.Sub(t) > time.Minute {
+				delete(p.usageLimitLogged, k)
+			}
+		}
+	}
+	return true
 }
 
 // SetOnEndpointSuccess sets the callback for successful endpoint requests
@@ -100,6 +145,7 @@ func (p *Proxy) Start() error {
 // StartWithMux starts the proxy server with an optional custom mux
 func (p *Proxy) StartWithMux(customMux *http.ServeMux) error {
 	port := p.config.GetPort()
+	bindHost := resolveBindHost()
 
 	var mux *http.ServeMux
 	if customMux != nil {
@@ -116,24 +162,62 @@ func (p *Proxy) StartWithMux(customMux *http.ServeMux) error {
 	mux.HandleFunc("/stats", p.handleStats)
 
 	p.server = &http.Server{
-		Addr:              fmt.Sprintf(":%d", port),
+		Addr:              fmt.Sprintf("%s:%d", bindHost, port),
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       5 * time.Minute,
-		WriteTimeout:      10 * time.Minute,
-		IdleTimeout:       120 * time.Second,
+		// WriteTimeout intentionally disabled: it caps the time between
+		// WriteHeader and the final Write. For SSE streams that means a
+		// hard kill at 10m regardless of progress, which truncates long
+		// Claude reasoning streams. Per-request context cancellation and
+		// upstream ResponseHeaderTimeout already cover the "stuck" case.
+		WriteTimeout: 0,
+		IdleTimeout:  120 * time.Second,
 	}
 
-	logger.Info("Osante Proxy starting on port %d", port)
+	if bindHost == "127.0.0.1" || bindHost == "localhost" {
+		logger.Info("Osante Proxy starting on %s:%d (loopback only)", bindHost, port)
+	} else {
+		logger.Warn("Osante Proxy starting on %s:%d — admin API is UNAUTHENTICATED, bind to 127.0.0.1 unless you know what you're doing", bindHost, port)
+	}
 	logger.Info("Configured %d endpoints", len(p.config.GetEndpoints()))
 
 	return p.server.ListenAndServe()
 }
 
-// Stop stops the proxy server
+// ResolveBindHost returns the host the HTTP server should bind to. The default
+// is loopback only — the admin API has no auth and is explicitly documented as
+// loopback-only. Set OSANTE_BIND to override (e.g. "0.0.0.0" for LAN access or
+// "::" for all interfaces incl. IPv6).
+func ResolveBindHost() string {
+	raw := strings.TrimSpace(os.Getenv("OSANTE_BIND"))
+	if raw == "" {
+		return "127.0.0.1"
+	}
+	return raw
+}
+
+// resolveBindHost is the package-internal alias kept for symmetry with the
+// rest of the unexported helpers.
+func resolveBindHost() string { return ResolveBindHost() }
+
+// Stop stops the proxy server gracefully. It first attempts a Shutdown with a
+// 30s deadline so in-flight streaming responses get a chance to finish, then
+// falls back to Close if that times out.
 func (p *Proxy) Stop() error {
-	if p.server != nil {
-		return p.server.Close()
+	if p.server == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := p.server.Shutdown(ctx); err != nil {
+		// Shutdown returns context.DeadlineExceeded if streams ran past the
+		// deadline. Close() the server to force-tear remaining connections.
+		closeErr := p.server.Close()
+		if closeErr != nil {
+			return fmt.Errorf("graceful shutdown failed: %w; close also failed: %v", err, closeErr)
+		}
+		return err
 	}
 	return nil
 }
@@ -190,25 +274,35 @@ func (p *Proxy) currentRequestEndpoint() config.Endpoint {
 	return config.Endpoint{}
 }
 
-// markRequestActive marks an endpoint as having active requests
+// markRequestActive increments the in-flight counter for the given endpoint.
+// Each call must be matched by a markRequestInactive on the same endpoint or
+// rotateEndpoint will wait the full 500ms timeout before switching.
 func (p *Proxy) markRequestActive(endpointName string) {
 	p.activeRequestsMu.Lock()
 	defer p.activeRequestsMu.Unlock()
-	p.activeRequests[endpointName] = true
+	p.activeRequests[endpointName]++
 }
 
-// markRequestInactive marks an endpoint as having no active requests
+// markRequestInactive decrements the in-flight counter. Bounded at zero so a
+// stray Inactive without a preceding Active doesn't underflow.
 func (p *Proxy) markRequestInactive(endpointName string) {
 	p.activeRequestsMu.Lock()
 	defer p.activeRequestsMu.Unlock()
-	delete(p.activeRequests, endpointName)
+	if c, ok := p.activeRequests[endpointName]; ok {
+		if c <= 1 {
+			delete(p.activeRequests, endpointName)
+		} else {
+			p.activeRequests[endpointName] = c - 1
+		}
+	}
 }
 
-// hasActiveRequests checks if an endpoint has active requests
+// hasActiveRequests reports whether the endpoint currently has any in-flight
+// requests.
 func (p *Proxy) hasActiveRequests(endpointName string) bool {
 	p.activeRequestsMu.RLock()
 	defer p.activeRequestsMu.RUnlock()
-	return p.activeRequests[endpointName]
+	return p.activeRequests[endpointName] > 0
 }
 
 // isCurrentEndpoint checks if the given endpoint is still the current one
@@ -352,6 +446,17 @@ func (p *Proxy) selectCredential(endpointName string) (*storage.EndpointCredenti
 	return p.storage.GetUsableEndpointCredential(endpointName, time.Now().UTC())
 }
 
+// earliestTokenCooldown returns the soonest future cooldown_until across the
+// endpoint's enabled credentials. Zero time means no enabled credential is
+// currently cooled (pool is empty/all-invalid/all-expired) — the caller
+// should leave the endpoint cooldown alone in that case.
+func (p *Proxy) earliestTokenCooldown(endpointName string, now time.Time) (time.Time, error) {
+	if p.storage == nil {
+		return time.Time{}, nil
+	}
+	return p.storage.EarliestTokenCooldown(endpointName, now)
+}
+
 func (p *Proxy) markCredentialSuccess(credentialID int64) {
 	if credentialID <= 0 || p.storage == nil {
 		return
@@ -359,6 +464,26 @@ func (p *Proxy) markCredentialSuccess(credentialID int64) {
 	if err := p.storage.MarkCredentialSuccess(credentialID, time.Now().UTC()); err != nil {
 		logger.Warn("Failed to mark credential success (id=%d): %v", credentialID, err)
 	}
+}
+
+// TraceSnapshot returns a copy of the most recent request traces, newest
+// first. Used by the /api/trace admin endpoint. limit <= 0 returns all
+// records currently in the ring.
+func (p *Proxy) TraceSnapshot(limit int) []TraceRecord {
+	if p.traceRing == nil {
+		return nil
+	}
+	return p.traceRing.Snapshot(limit)
+}
+
+// beginTrace starts a new request trace if tracing is enabled. Returns nil
+// if the ring is unavailable so callers can flow nil through without nil
+// checks (TraceHandle methods are nil-safe).
+func (p *Proxy) beginTrace() *TraceHandle {
+	if p.traceRing == nil {
+		return nil
+	}
+	return p.traceRing.Begin()
 }
 
 func (p *Proxy) recordCredentialUsage(credentialID int64, endpointName string, requests, errors, inputTokens, outputTokens int) {

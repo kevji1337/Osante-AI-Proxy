@@ -206,7 +206,7 @@ func GeminiStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 		ctx.MessageStartSent = true
 		ctx.MessageID = "gemini-resp"
 		writeEvent(map[string]interface{}{
-			"type": "response.created",
+			"type":     "response.created",
 			"response": map[string]interface{}{"id": ctx.MessageID, "object": "response", "status": "in_progress"},
 		})
 	}
@@ -437,4 +437,3 @@ func convertOpenAI2ContentToGeminiParts(content interface{}) []map[string]interf
 
 	return parts
 }
-

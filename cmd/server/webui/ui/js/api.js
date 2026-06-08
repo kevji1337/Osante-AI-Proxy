@@ -97,6 +97,25 @@ class APIClient {
         return this.request('GET', `/logs?${params.toString()}`);
     }
 
+    // Live request trace ring (the Inspector view)
+    async getTrace(limit = 50) {
+        const params = new URLSearchParams({ limit: String(limit) });
+        return this.request('GET', `/trace?${params.toString()}`);
+    }
+
+    // Detailed health snapshot — JSON, served by the proxy, not /api
+    async getHealth() {
+        const resp = await fetch('/health');
+        if (!resp.ok) throw new Error(`Health check failed: HTTP ${resp.status}`);
+        return resp.json();
+    }
+
+    // Quick actions
+    async clearCooldowns()  { return this.request('POST', '/actions/clear-cooldowns'); }
+    async flushStats()      { return this.request('POST', '/actions/flush-stats'); }
+    // Returns the download URL — the browser handles the file save itself.
+    exportBackupURL() { return `${this.baseURL}/actions/export-backup`; }
+
     // Statistics
     async getStatsSummary() {
         return this.request('GET', '/stats/summary');
