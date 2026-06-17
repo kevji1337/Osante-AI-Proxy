@@ -79,7 +79,7 @@ func (p *Proxy) handleProxyRequest(w http.ResponseWriter, r *http.Request) {
 			if p.writeLastUpstreamError(w, reqCtx) {
 				return
 			}
-			http.Error(w, "No enabled endpoints available", http.StatusServiceUnavailable)
+			writeProxyError(w, http.StatusServiceUnavailable, "overloaded_error", "No enabled endpoints available")
 			return
 		}
 
@@ -106,37 +106,163 @@ func (p *Proxy) handleProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	p.writeExhaustedResponse(w, reqCtx)
+}
+
+// writeExhaustedResponse is the final response when no endpoint could serve
+// the request after the full retry loop ran out. We use HTTP 503 with an
+// Anthropic-shape JSON envelope; this gives the client (a) a clear
+// non-200 status so retry logic + circuit-breakers actually trigger,
+// and (b) a parseable body so the user sees a real message instead of
+// AssertionError on Hermes-style clients.
+//
+// We deliberately do NOT return 200 OK with the error masquerading as an
+// assistant turn: that would short-circuit client-side retries and leave
+// the user staring at "Osante Proxy: <something>" as the answer to their
+// prompt — exactly what the proxy exists to prevent.
+func (p *Proxy) writeExhaustedResponse(w http.ResponseWriter, reqCtx *proxyRequestContext) {
 	if p.writeLastUpstreamError(w, reqCtx) {
 		return
 	}
-	http.Error(w, "All endpoints failed", http.StatusServiceUnavailable)
+	writeProxyError(w, http.StatusServiceUnavailable, "overloaded_error", "All endpoints failed")
 }
 
 // writeLastUpstreamError replays the most recent upstream error response to the
 // client. Used when every endpoint is exhausted (e.g. all in usage-limit
 // cooldown) so the client sees the real upstream error instead of a generic 503.
+//
+// If the upstream body is NOT JSON (Cloudflare HTML 502, gateway plain-text
+// "Bad Gateway", reverse-proxy "no upstream" pages, etc.) we synthesize a
+// proper Anthropic-style JSON error instead. If the body IS JSON but does not
+// match the Anthropic envelope (FreeModel returns `{"error":"<msg>"}`,
+// OpenAI returns `{"error":{"message":"...","type":"..."}}`), we extract the
+// human message and rewrap. Without this rewrap, Hermes-style clients parse
+// the body, fail to find `error.message`, and crash with AssertionError on
+// a blank `Error:` field.
 func (p *Proxy) writeLastUpstreamError(w http.ResponseWriter, reqCtx *proxyRequestContext) bool {
 	if reqCtx.lastUpstreamStatus == 0 || reqCtx.lastUpstreamBody == nil {
 		return false
 	}
-	for key, values := range reqCtx.lastUpstreamHeader {
-		if key == "Content-Encoding" || key == "Content-Length" {
-			continue
+
+	status := reqCtx.lastUpstreamStatus
+
+	if !looksLikeJSONBody(reqCtx.lastUpstreamBody) {
+		// Plain-text or HTML upstream error. Don't forward it as-is — wrap.
+		msg := truncateString(strings.TrimSpace(string(reqCtx.lastUpstreamBody)), 500)
+		if msg == "" {
+			msg = fmt.Sprintf("Upstream returned HTTP %d with empty body", status)
 		}
-		for _, value := range values {
-			w.Header().Add(key, value)
+		writeProxyError(w, status, errTypeForStatus(status), msg)
+		return true
+	}
+
+	// JSON body. Either it already speaks Anthropic ({"type":"error","error":{...}})
+	// or it doesn't — extract a message and rewrap so the envelope is consistent.
+	msg, looksAnthropic := extractUpstreamErrorMessage(reqCtx.lastUpstreamBody)
+	if looksAnthropic {
+		for key, values := range reqCtx.lastUpstreamHeader {
+			if key == "Content-Encoding" || key == "Content-Length" {
+				continue
+			}
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(reqCtx.lastUpstreamBody)
+		return true
+	}
+
+	if msg == "" {
+		msg = fmt.Sprintf("Upstream returned HTTP %d", status)
+	}
+	writeProxyError(w, status, errTypeForStatus(status), msg)
+	return true
+}
+
+// extractUpstreamErrorMessage tries to pull a human-readable error message
+// out of an upstream JSON body. Returns (message, isAnthropicShape).
+//
+// Recognised shapes:
+//   - Anthropic:  {"type":"error","error":{"type":"...","message":"..."}}
+//   - FreeModel:  {"error":"Usage limit reached, will reset on today at ..."}
+//   - OpenAI:     {"error":{"message":"...","type":"...","code":"..."}}
+//   - Generic:    {"message":"..."}, {"detail":"..."}, {"title":"..."}
+//
+// Anything we can't parse falls through with an empty message.
+func extractUpstreamErrorMessage(body []byte) (string, bool) {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return "", false
+	}
+
+	// Anthropic shape: {"type":"error","error":{"message":"..."}}
+	if t, ok := raw["type"].(string); ok && t == "error" {
+		if errObj, ok := raw["error"].(map[string]interface{}); ok {
+			if msg, ok := errObj["message"].(string); ok && strings.TrimSpace(msg) != "" {
+				return msg, true
+			}
 		}
 	}
-	w.WriteHeader(reqCtx.lastUpstreamStatus)
-	_, _ = w.Write(reqCtx.lastUpstreamBody)
-	return true
+
+	// Nested `error` object (OpenAI-style): {"error":{"message":"...","type":"..."}}
+	if errObj, ok := raw["error"].(map[string]interface{}); ok {
+		if msg, ok := errObj["message"].(string); ok && strings.TrimSpace(msg) != "" {
+			return msg, false
+		}
+		// `error` object without `message` — try `detail` or `title` inside it.
+		if detail, ok := errObj["detail"].(string); ok && strings.TrimSpace(detail) != "" {
+			return detail, false
+		}
+	}
+
+	// Flat `error` string (FreeModel-style): {"error":"Usage limit reached..."}
+	if errStr, ok := raw["error"].(string); ok && strings.TrimSpace(errStr) != "" {
+		return errStr, false
+	}
+
+	// Generic fallbacks for whatever upstreams cooked up next.
+	for _, key := range []string{"message", "detail", "title", "description"} {
+		if v, ok := raw[key].(string); ok && strings.TrimSpace(v) != "" {
+			return v, false
+		}
+	}
+
+	return "", false
+}
+
+// errTypeForStatus maps an HTTP status into a plausible Anthropic-style
+// error type so the Final error: message in clients is at least sensible.
+func errTypeForStatus(status int) string {
+	switch {
+	case status == http.StatusBadRequest:
+		return "invalid_request_error"
+	case status == http.StatusUnauthorized:
+		return "authentication_error"
+	case status == http.StatusForbidden:
+		return "permission_error"
+	case status == http.StatusNotFound:
+		return "not_found_error"
+	case status == http.StatusRequestEntityTooLarge:
+		return "request_too_large"
+	case status == http.StatusTooManyRequests:
+		return "rate_limit_error"
+	case status == http.StatusPaymentRequired:
+		return "rate_limit_error"
+	case status >= 500 && status < 600:
+		// 502/503/504 from a CDN are technically "the proxy can't reach the
+		// origin"; treat as overloaded so clients retry.
+		return "overloaded_error"
+	}
+	return "api_error"
 }
 
 func (p *Proxy) newProxyRequestContext(w http.ResponseWriter, r *http.Request) (*proxyRequestContext, error) {
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		logger.Error("Failed to read request body: %v", err)
-		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		writeProxyError(w, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
 		return nil, err
 	}
 	defer r.Body.Close()
@@ -178,7 +304,7 @@ func (p *Proxy) newProxyRequestContext(w http.ResponseWriter, r *http.Request) (
 	endpoints := p.getEnabledEndpoints()
 	if len(endpoints) == 0 {
 		logger.Error("No enabled endpoints available")
-		http.Error(w, "No enabled endpoints configured", http.StatusServiceUnavailable)
+		writeProxyError(w, http.StatusServiceUnavailable, "overloaded_error", "No enabled endpoints configured")
 		return nil, errNoEnabledEndpoints
 	}
 
@@ -232,6 +358,22 @@ func (p *Proxy) runEndpointAttempt(w http.ResponseWriter, reqCtx *proxyRequestCo
 	if result := p.prepareEndpointAttempt(reqCtx, attempt); result != attemptResultDone {
 		p.markRequestInactive(attempt.endpoint.Name)
 		return result
+	}
+
+	// GitLab Duo uses WebSocket, not HTTP — hand off to the dedicated handler
+	// and short-circuit the normal HTTP proxy pipeline.
+	if attempt.transformerName == "cc_gitlabduo" {
+		p.markRequestInactive(attempt.endpoint.Name)
+		// Pass the full conversation history as goal so GitLab Duo has context.
+		goal := extractGitLabDuoHistory(reqCtx.bodyBytes)
+		namespaceID := extractGitLabDuoNamespaceID(reqCtx.bodyBytes)
+		logger.DebugLog("[gitlabduo] goal len=%d", len(goal))
+		p.handleGitLabDuoRequest(
+			w, reqCtx.httpRequest,
+			attempt.endpoint, attempt.apiKey, attempt.credentialID,
+			goal, attempt.modelName, namespaceID,
+		)
+		return attemptResultDone
 	}
 
 	p.logUpstreamRequest(reqCtx, attempt)
@@ -658,18 +800,44 @@ func detectThinkingEnabled(transformerName string, transformedBody []byte) bool 
 }
 
 func writeInvalidRequestError(w http.ResponseWriter, message string) {
+	writeProxyError(w, http.StatusBadRequest, "invalid_request_error", message)
+}
+
+// writeProxyError emits a JSON error in the Anthropic-style shape that all
+// our supported clients (Claude Code, Hermes, plain OpenAI wrappers) can
+// parse without choking. http.Error() returns text/plain — clients that try
+// to parse the body as JSON to surface a useful message see an empty
+// Error: field instead (e.g. Hermes prints "Error:" with nothing after it
+// and then raises AssertionError because its result schema isn't satisfied).
+//
+// Shape (compatible with /v1/messages-style upstreams):
+//
+//	{
+//	  "type": "error",
+//	  "error": { "type": "<errType>", "message": "<message>" }
+//	}
+//
+// errType is one of the documented Anthropic error types: invalid_request_error,
+// authentication_error, permission_error, not_found_error, request_too_large,
+// rate_limit_error, api_error, overloaded_error. Anything else gets mapped to
+// api_error by the helper at the call site if needed.
+func writeProxyError(w http.ResponseWriter, status int, errType, message string) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
-	errorResp := map[string]interface{}{
+	w.WriteHeader(status)
+	body, err := json.Marshal(map[string]interface{}{
+		"type": "error",
 		"error": map[string]interface{}{
-			"type":    "invalid_request_error",
+			"type":    errType,
 			"message": message,
 		},
+	})
+	if err != nil {
+		// Marshalling a fixed map can't realistically fail; fall back to a
+		// minimal hand-written JSON so the client still parses something.
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"api_error","message":"internal error"}}`))
+		return
 	}
-	jsonBytes, err := json.Marshal(errorResp)
-	if err == nil {
-		_, _ = w.Write(jsonBytes)
-	}
+	_, _ = w.Write(body)
 }
 
 func readResponseBody(resp *http.Response) []byte {
@@ -717,4 +885,269 @@ func looksLikeJSONBody(body []byte) bool {
 		return true
 	}
 	return false
+}
+
+// extractGitLabDuoHistory builds a goal string for GitLab Duo from the full
+// Anthropic request body. It includes:
+//  1. A condensed system prompt (first 800 chars) so GitLab Duo knows the
+//     assistant's role and any project-specific instructions.
+//  2. The full conversation history (user/assistant turns) so context is
+//     preserved across messages without a persistent WebSocket session.
+//
+// Format:
+//
+//	[System: ...]
+//	User: ...
+//	Assistant: ...
+//	User: ...
+func extractGitLabDuoHistory(body []byte) string {
+	var req struct {
+		System   json.RawMessage `json:"system"`
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return ""
+	}
+
+	var sb strings.Builder
+
+	// Include a condensed system prompt when present. We cap it at 800 runes
+	// to leave room for the conversation history within the 16 384-char limit.
+	if len(req.System) > 0 {
+		// req.System is json.RawMessage — decode to any first.
+		var sysAny any
+		if err := json.Unmarshal(req.System, &sysAny); err == nil {
+			sysText := flattenAnySystem(sysAny)
+			// Strip Claude Code billing/tool headers — keep only human-readable lines.
+			sysText = condensedSystemPrompt(sysText, 800)
+			if sysText != "" {
+				sb.WriteString("[System: ")
+				sb.WriteString(sysText)
+				sb.WriteString("]\n")
+			}
+		}
+	}
+
+	for _, m := range req.Messages {
+		switch m.Role {
+		case "user":
+			text := extractUserQuestion(m.Content)
+			if text == "" {
+				continue
+			}
+			if sb.Len() > 0 {
+				sb.WriteString("\n")
+			}
+			sb.WriteString("User: ")
+			sb.WriteString(text)
+		case "assistant":
+			text := decodeRawContent(m.Content)
+			if text == "" {
+				continue
+			}
+			if sb.Len() > 0 {
+				sb.WriteString("\n")
+			}
+			sb.WriteString("Assistant: ")
+			sb.WriteString(text)
+		}
+	}
+	return sb.String()
+}
+
+// condensedSystemPrompt extracts meaningful lines from the system prompt and
+// truncates to maxRunes. It skips Claude Code internal headers (billing,
+// tool descriptions, XML tags) and keeps human-readable instructions.
+func condensedSystemPrompt(s string, maxRunes int) string {
+	var sb strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Skip Claude Code internal lines.
+		if strings.HasPrefix(trimmed, "x-anthropic-") ||
+			strings.HasPrefix(trimmed, "<") ||
+			strings.HasPrefix(trimmed, "SessionStart:") ||
+			strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteString(" ")
+		}
+		sb.WriteString(trimmed)
+		if len([]rune(sb.String())) >= maxRunes {
+			break
+		}
+	}
+	runes := []rune(sb.String())
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes])
+	}
+	return sb.String()
+}
+
+// extractGitLabDuoUserText pulls the actual user question from an Anthropic
+// /v1/messages body. Claude Code wraps the real question together with a large
+// <system-reminder> block inside the last user message. We skip system-context
+// blocks and return only the human-typed text.
+func extractGitLabDuoUserText(body []byte) string {
+	var req struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return ""
+	}
+	// Walk messages in reverse; for each user message try to extract the
+	// actual question (skipping system-context injections).
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role != "user" {
+			continue
+		}
+		if text := extractUserQuestion(req.Messages[i].Content); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+// extractUserQuestion extracts the human-typed question from an Anthropic
+// content field. Claude Code injects a large <system-reminder> block as the
+// first text block; the actual question is in a later block or is the only
+// block when there is no system injection.
+func extractUserQuestion(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// Plain string content — return as-is unless it looks like a system injection.
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if !isSystemInjection(s) {
+			return s
+		}
+		// The whole string is a system injection — nothing useful here.
+		return ""
+	}
+	// Array of content blocks.
+	var blocks []map[string]any
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return ""
+	}
+	// Collect non-system text blocks; prefer the last one.
+	var userParts []string
+	for _, b := range blocks {
+		btype, _ := b["type"].(string)
+		switch btype {
+		case "text":
+			t, _ := b["text"].(string)
+			if t != "" && !isSystemInjection(t) {
+				userParts = append(userParts, t)
+			}
+		case "tool_result":
+			// Skip tool results — they are context, not the user question.
+		}
+	}
+	if len(userParts) > 0 {
+		return strings.Join(userParts, "\n")
+	}
+	// Fallback: if all blocks were system injections, return the shortest one
+	// (least likely to be a giant system prompt).
+	shortest := ""
+	for _, b := range blocks {
+		if btype, _ := b["type"].(string); btype == "text" {
+			if t, _ := b["text"].(string); t != "" {
+				if shortest == "" || len(t) < len(shortest) {
+					shortest = t
+				}
+			}
+		}
+	}
+	return shortest
+}
+
+// isSystemInjection reports whether a text block looks like a Claude Code
+// system-context injection rather than a human-typed message.
+func isSystemInjection(s string) bool {
+	prefixes := []string{
+		"<system-reminder>",
+		"<context>",
+		"SessionStart:",
+		"x-anthropic-billing-header:",
+	}
+	trimmed := strings.TrimSpace(s)
+	for _, p := range prefixes {
+		if strings.HasPrefix(trimmed, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// decodeRawContent decodes an Anthropic content field (string or []block).
+func decodeRawContent(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var blocks []map[string]any
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, b := range blocks {
+		if t, ok := b["text"].(string); ok && t != "" {
+			if sb.Len() > 0 {
+				sb.WriteString("\n")
+			}
+			sb.WriteString(t)
+		}
+	}
+	return sb.String()
+}
+
+// flattenAnySystem converts Anthropic's polymorphic system field to a string.
+func flattenAnySystem(system any) string {
+	switch s := system.(type) {
+	case string:
+		return s
+	case []any:
+		var sb strings.Builder
+		for _, block := range s {
+			if bm, ok := block.(map[string]any); ok {
+				if t, ok := bm["text"].(string); ok && t != "" {
+					if sb.Len() > 0 {
+						sb.WriteString("\n")
+					}
+					sb.WriteString(t)
+				}
+			}
+		}
+		return sb.String()
+	}
+	return ""
+}
+
+// extractGitLabDuoNamespaceID tries to find a GitLab namespace/group ID in
+// the request body or returns empty string (the handler will omit the param).
+func extractGitLabDuoNamespaceID(body []byte) string {
+	var req struct {
+		NamespaceID string `json:"namespace_id"`
+		GroupID     string `json:"group_id"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return ""
+	}
+	if req.NamespaceID != "" {
+		return req.NamespaceID
+	}
+	return req.GroupID
 }

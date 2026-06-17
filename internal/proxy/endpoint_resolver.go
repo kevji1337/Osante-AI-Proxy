@@ -134,18 +134,29 @@ func (r *EndpointResolver) parseEndpointFromQuery(req *http.Request) string {
 	return ""
 }
 
-// findEndpointByName looks up an enabled endpoint by name (case-insensitive).
+// findEndpointByName looks up an enabled endpoint by name. Matching is
+// case-insensitive and ignores spaces, dashes and underscores so that
+// "gitlab-duo", "GitLab Duo" and "gitlabduo" all resolve to the same entry.
 func (r *EndpointResolver) findEndpointByName(name string, endpoints []config.Endpoint) *config.Endpoint {
-	targetName := strings.ToLower(strings.TrimSpace(name))
+	targetName := normalizeEndpointName(name)
 
 	for i := range endpoints {
 		endpoint := &endpoints[i]
 		if !endpoint.Enabled {
 			continue
 		}
-		if strings.ToLower(strings.TrimSpace(endpoint.Name)) == targetName {
+		if normalizeEndpointName(endpoint.Name) == targetName {
 			return endpoint
 		}
 	}
 	return nil
+}
+
+// normalizeEndpointName lower-cases the input and strips spaces, dashes and
+// underscores, so cosmetic differences between user input and the stored
+// endpoint name don't trigger "endpoint not found" errors.
+func normalizeEndpointName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	r := strings.NewReplacer(" ", "", "-", "", "_", "")
+	return r.Replace(s)
 }

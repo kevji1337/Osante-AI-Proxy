@@ -111,6 +111,13 @@ proxy logs a WARN on non-loopback binds.
 
 ## Obsidian Memory
 
+> **MUST-DO:** every read/write of project memory goes through the
+> **`obsidian` skill** (invoke via the `Skill` tool). Do **not** shell out
+> to `obsidian ...` directly and do **not** edit files under
+> `C:\programming\Obsidian Memories\Osante Proxy\` with `Write` / `Edit`.
+> All updates land under the vault folder **`Osante Proxy/`** — never write
+> Osante notes anywhere else in the vault.
+
 Project memory lives in the Obsidian vault `Obsidian Memories` under the folder
 `Osante Proxy/`. Access it through the **`obsidian` skill** (invoke via the
 `Skill` tool, not by shelling out to `obsidian` directly — the skill loads the
@@ -124,7 +131,7 @@ desktop instance via its plugin.
 | `Osante Proxy/context.md` | Project overview: stack, entry points, key modules, current state. Update when architecture shifts. |
 | `Osante Proxy/decisions.md` | Decision log — one entry per non-trivial choice, ISO date prefix. |
 | `Osante Proxy/todo.md` | Open tasks and questions carried between sessions. |
-| `Osante Proxy/daily/YYYY-MM-DD.md` | Per-session journal — what was done, what's pending. |
+| `Osante Proxy/daily/Proxy-YYYY-MM-DD.md` | Per-session journal — what was done, what's pending. |
 
 ### Session protocol
 
@@ -139,17 +146,12 @@ If the file doesn't exist, create it with a starter overview via the same
 skill (`create path="Osante Proxy/context.md" content="..."`). Optionally also
 read `todo.md` and the latest `daily/*.md` to pick up unfinished threads.
 
-**At the end of a non-trivial session:**
-
-1. Append a session summary to today's daily note:
-   `append path="Osante Proxy/daily/<YYYY-MM-DD>.md" content="..."`.
-   If the daily file doesn't exist yet, `create` it first with a
-   `# YYYY-MM-DD` header.
-2. If architectural decisions were made, append to `decisions.md` with a
-   `## YYYY-MM-DD — <title>` heading and a short rationale.
-3. If the project shape changed (new module, removed feature, new env var),
-   update the relevant section of `context.md`.
-4. If new open questions surfaced, add them to `todo.md`.
+**At the end of a non-trivial session:** append the summary via the
+`obsidian` skill — `append path="Osante Proxy/daily/Proxy-<сегодня>.md"
+content="..."` — and update `context.md` / `decisions.md` if new
+architectural decisions were made. If new open questions surfaced, add
+them to `todo.md`. Create the daily file first with `create` if it
+doesn't exist yet.
 
 ### Error handling
 

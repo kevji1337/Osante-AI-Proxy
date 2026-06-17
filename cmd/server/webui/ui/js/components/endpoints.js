@@ -603,6 +603,7 @@ class Endpoints {
                                     <option value="openai" ${endpoint?.transformer === 'openai' ? 'selected' : ''}>${t('transformers.openai')}</option>
                                     <option value="openai2" ${endpoint?.transformer === 'openai2' ? 'selected' : ''}>${t('transformers.openai2')}</option>
                                     <option value="gemini" ${endpoint?.transformer === 'gemini' ? 'selected' : ''}>${t('transformers.gemini')}</option>
+                                    <option value="gitlabduo" ${endpoint?.transformer === 'gitlabduo' ? 'selected' : ''}>${t('transformers.gitlabduo')}</option>
                                     <option value="deepseek" ${endpoint?.transformer === 'deepseek' ? 'selected' : ''}>${t('transformers.deepseek')}</option>
                                 </select>
                             </div>

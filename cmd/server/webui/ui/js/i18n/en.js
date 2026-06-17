@@ -256,6 +256,7 @@ export default {
         openai: 'OpenAI',
         openai2: 'OpenAI Responses',
         gemini: 'Gemini',
+        gitlabduo: 'GitLab Duo',
         deepseek: 'DeepSeek'
     }
 };

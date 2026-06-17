@@ -67,9 +67,10 @@ var ccFactory = transformerFactory{
 		}
 		return cc.NewClaudeTransformer()
 	},
-	"openai":  func(m string) transformer.Transformer { return cc.NewOpenAITransformer(m) },
-	"openai2": func(m string) transformer.Transformer { return cc.NewOpenAI2Transformer(m) },
-	"gemini":  func(m string) transformer.Transformer { return cc.NewGeminiTransformer(m) },
+	"openai":    func(m string) transformer.Transformer { return cc.NewOpenAITransformer(m) },
+	"openai2":   func(m string) transformer.Transformer { return cc.NewOpenAI2Transformer(m) },
+	"gemini":    func(m string) transformer.Transformer { return cc.NewGeminiTransformer(m) },
+	"gitlabduo": func(m string) transformer.Transformer { return cc.NewGitLabDuoTransformer(m) },
 }
 
 var cxChatFactory = transformerFactory{
@@ -121,6 +122,11 @@ func getTargetPath(originalPath string, endpoint config.Endpoint, transformedBod
 		return "/v1/chat/completions"
 	case "cc_openai2", "cx_resp_openai2", "cx_chat_openai2":
 		return "/v1/responses"
+	case "cc_gitlabduo":
+		// GitLab Duo Chat completions REST endpoint. The endpoint URL
+		// configured for this transformer should be the GitLab instance
+		// root (e.g. "https://gitlab.com"); we append the API path here.
+		return "/api/v4/chat/completions"
 	case "cc_gemini", "cx_chat_gemini", "cx_resp_gemini":
 		var geminiReq struct {
 			Stream bool `json:"stream"`
@@ -178,6 +184,15 @@ func buildProxyRequest(r *http.Request, endpoint config.Endpoint, apiKey string,
 	switch transformerName {
 	case "cc_openai", "cc_openai2", "cx_chat_openai", "cx_chat_openai2", "cx_resp_openai", "cx_resp_openai2":
 		proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
+	case "cc_gitlabduo":
+		// GitLab accepts both PRIVATE-TOKEN (PAT) and Authorization: Bearer
+		// (PAT or OAuth) — set both so any kind of GitLab token works.
+		proxyReq.Header.Set("PRIVATE-TOKEN", apiKey)
+		proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
+		// Strip the Anthropic-style x-api-key header that Claude Code adds —
+		// some upstreams reject unexpected auth headers.
+		proxyReq.Header.Del("x-api-key")
+		proxyReq.Header.Del("X-Api-Key")
 	case "cc_gemini", "cx_chat_gemini", "cx_resp_gemini":
 		q := proxyReq.URL.Query()
 		q.Set("key", apiKey)

@@ -209,7 +209,7 @@ func (p *Proxy) getDefaultModels(ep config.Endpoint) []ModelInfo {
 // handleModels handles GET /v1/models requests
 func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeProxyError(w, http.StatusMethodNotAllowed, "invalid_request_error", "Method not allowed")
 		return
 	}
 
@@ -218,7 +218,7 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	refreshEnabled := p.config.ModelsCacheRefreshEnabled
 
 	if refresh && !refreshEnabled {
-		http.Error(w, "Refresh is disabled in configuration", http.StatusForbidden)
+		writeProxyError(w, http.StatusForbidden, "permission_error", "Refresh is disabled in configuration")
 		return
 	}
 

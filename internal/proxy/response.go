@@ -43,6 +43,11 @@ func (p *Proxy) handleNonStreamingResponse(w http.ResponseWriter, resp *http.Res
 
 	logger.DebugLog("[%s] Transformed Response: %s", endpoint.Name, string(transformedResp))
 
+	// If the transformer returned a synthesised SSE body (e.g. the GitLab
+	// Duo transformer turning a JSON answer into an Anthropic stream),
+	// override the upstream's Content-Type so the client parses it as SSE.
+	transformedIsSSE := looksLikeSSEBody(transformedResp)
+
 	// Extract token usage
 	inputTokens, outputTokens := extractTokenUsage(transformedResp)
 	if inputTokens == 0 && outputTokens == 0 {
@@ -56,15 +61,32 @@ func (p *Proxy) handleNonStreamingResponse(w http.ResponseWriter, resp *http.Res
 		if key == "Content-Length" || key == "Content-Encoding" {
 			continue
 		}
+		if transformedIsSSE && (key == "Content-Type" || strings.EqualFold(key, "Content-Type")) {
+			continue
+		}
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
+	}
+
+	if transformedIsSSE {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
 	}
 
 	w.WriteHeader(resp.StatusCode)
 	w.Write(transformedResp)
 
 	return inputTokens, outputTokens, nil
+}
+
+// looksLikeSSEBody reports whether body looks like an SSE stream (i.e. starts
+// with an `event:` or `data:` line). Used to detect transformer-synthesised
+// streams so we can flip the Content-Type before flushing to the client.
+func looksLikeSSEBody(body []byte) bool {
+	trimmed := strings.TrimLeft(string(body), " \t\r\n")
+	return strings.HasPrefix(trimmed, "event:") || strings.HasPrefix(trimmed, "data:")
 }
 
 // extractTokenUsage extracts token counts from response

@@ -1,5 +1,7 @@
 package main
 
+//go:generate goversioninfo -platform-specific=false -64=true -o resource_windows_amd64.syso versioninfo.json
+
 import (
 	"errors"
 	"flag"

@@ -126,6 +126,16 @@ func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey stri
 				},
 			},
 		})
+	case "gitlabduo":
+		// /api/v4/chat/completions is gated for non-team-members. Use the
+		// public /api/v4/version endpoint instead — it confirms both the
+		// token works AND the GitLab instance is reachable. We send a POST
+		// even though /version is a GET because the rest of this function
+		// expects POST; GitLab tolerates the verb and returns 200/JSON.
+		// (Actual probing happens via GET below — see sendTestRequest tail.)
+		url = fmt.Sprintf("%s/api/v4/version", endpoint.APIUrl)
+		reqBody = nil
+		err = nil
 	default:
 		return "", fmt.Errorf("unsupported transformer: %s", endpoint.Transformer)
 	}
@@ -134,12 +144,24 @@ func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey stri
 		return "", fmt.Errorf("failed to marshal request: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(reqBody))
+	// gitlabduo uses GET /api/v4/version as a lightweight health check.
+	method := "POST"
+	var bodyReader *bytes.Buffer
+	if endpoint.Transformer == "gitlabduo" {
+		method = "GET"
+		bodyReader = bytes.NewBuffer(nil)
+	} else {
+		bodyReader = bytes.NewBuffer(reqBody)
+	}
+
+	req, err := http.NewRequest(method, url, bodyReader)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %v", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	if method == "POST" {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	// Add authentication based on transformer
 	switch endpoint.Transformer {
@@ -153,6 +175,10 @@ func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey stri
 		q := req.URL.Query()
 		q.Add("key", apiKey)
 		req.URL.RawQuery = q.Encode()
+	case "gitlabduo":
+		// GitLab accepts both PRIVATE-TOKEN (PAT) and Authorization: Bearer.
+		req.Header.Set("PRIVATE-TOKEN", apiKey)
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
 	client := &http.Client{
@@ -172,6 +198,20 @@ func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey stri
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// gitlabduo health check hits /api/v4/version, which returns
+	// {"version":"...","revision":"..."}. A 200 means the PAT is valid for
+	// this instance — that's enough to say the endpoint works.
+	if endpoint.Transformer == "gitlabduo" {
+		var ver struct {
+			Version  string `json:"version"`
+			Revision string `json:"revision"`
+		}
+		if err := json.Unmarshal(body, &ver); err == nil && ver.Version != "" {
+			return fmt.Sprintf("GitLab %s OK (token valid)", ver.Version), nil
+		}
+		return "GitLab reachable (token valid)", nil
 	}
 
 	// Parse response to extract the actual message
@@ -350,6 +390,46 @@ func (h *Handler) fetchModelsFromProvider(apiUrl, apiKey, transformer string) ([
 			"gemini-pro",
 			"gemini-pro-vision",
 			"gemini-ultra",
+		}, nil
+	case "gitlabduo":
+		// GitLab Duo Chat completions REST API doesn't expose a model list,
+		// so we ship the catalog GitLab's own UI surfaces. The display names
+		// here match GitLab Duo's chat UI verbatim; the GitLab Duo
+		// transformer converts them into the matching `gitlab_identifier`
+		// (snake_case, see ai-assist/.../model_selection/models.yml) before
+		// forwarding to GitLab.
+		return []string{
+			"Claude Haiku 4.5 - Anthropic",
+			"Claude Haiku 4.5 - Bedrock",
+			"Claude Haiku 4.5 - Vertex",
+			"Claude Sonnet 4.5 - Anthropic",
+			"Claude Sonnet 4.5 - Vertex",
+			"Claude Sonnet 4.5 - Bedrock",
+			"Claude Sonnet 4.6 - Anthropic",
+			"Claude Sonnet 4.6 - Vertex",
+			"Claude Sonnet 4.6 - Bedrock",
+			"Claude Opus 4.5 - Anthropic",
+			"Claude Opus 4.5 - Vertex",
+			"Claude Opus 4.6 - Anthropic",
+			"Claude Opus 4.6 - Vertex",
+			"Claude Opus 4.6 - Bedrock",
+			"Claude Opus 4.7 - Anthropic",
+			"Claude Opus 4.7 - Vertex",
+			"Claude Opus 4.7 - Bedrock",
+			"Claude Opus 4.8 - Anthropic",
+			"Claude Opus 4.8 - Vertex",
+			"Claude Opus 4.8 - Bedrock",
+			"Gemini 3.5 Flash - Vertex",
+			"GPT-5.1 - OpenAI",
+			"GPT-5-Codex - OpenAI",
+			"GPT-5.2-Codex - OpenAI",
+			"GPT-5.3-Codex - OpenAI",
+			"GPT-5-Mini - OpenAI",
+			"GPT-5.2 - OpenAI",
+			"GPT-5.4 - OpenAI",
+			"GPT-5.4-Mini - OpenAI",
+			"GPT-5.4-Nano - OpenAI",
+			"GPT-5.5 - OpenAI",
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported transformer: %s", transformer)
