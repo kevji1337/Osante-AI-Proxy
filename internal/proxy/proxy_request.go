@@ -441,6 +441,7 @@ func (p *Proxy) prepareEndpointAttempt(reqCtx *proxyRequestContext, attempt *end
 		return attemptResultRetryNextEndpoint
 	}
 	attempt.proxyRequest = proxyReq
+	logger.Info("[%s] -> Forwarding to %s (model: %s)", attempt.endpoint.Name, proxyReq.URL.String(), attempt.modelName)
 
 	return attemptResultDone
 }
@@ -739,7 +740,12 @@ func (p *Proxy) handleFinalStatus(w http.ResponseWriter, reqCtx *proxyRequestCon
 			p.markCredentialFailure(attempt.credentialID, resp.StatusCode, errMsg)
 		}
 		p.recordCredentialUsage(attempt.credentialID, attempt.endpoint.Name, 0, 1, 0, 0)
-		logger.Warn("[%s] Response %d: %s", attempt.endpoint.Name, resp.StatusCode, errMsg)
+		targetURL := ""
+		if attempt.proxyRequest != nil && attempt.proxyRequest.URL != nil {
+			targetURL = attempt.proxyRequest.URL.String()
+		}
+		logger.Warn("[%s] Upstream Error %d [%s]: %s", attempt.endpoint.Name, resp.StatusCode, targetURL, errMsg)
+		logger.Warn("[%s] Outgoing payload was: %s", attempt.endpoint.Name, string(attempt.transformedBody))
 		logger.DebugLog("[%s] Response %d: %s", attempt.endpoint.Name, resp.StatusCode, errMsg)
 	}
 
@@ -771,20 +777,32 @@ func (p *Proxy) tryRefreshAfterAuthFailure(reqCtx *proxyRequestContext, attempt 
 }
 
 func resolveAttemptModelName(reqCtx *proxyRequestContext, endpoint config.Endpoint) string {
-	if strings.TrimSpace(endpoint.Model) != "" {
-		logger.Debug("[%s] using endpoint model: %s", endpoint.Name, endpoint.Model)
-		return strings.TrimSpace(endpoint.Model)
+	strip := func(s string) string {
+		m := strings.TrimSpace(s)
+		if strings.HasPrefix(m, "@") {
+			m = strings.TrimPrefix(m, "@")
+		}
+		if idx := strings.LastIndex(m, "/"); idx != -1 {
+			m = strings.TrimSpace(m[idx+1:])
+		}
+		return m
 	}
-	if reqCtx.modelOverride != "" {
-		logger.Debug("[%s] using model override: %s", endpoint.Name, reqCtx.modelOverride)
-		return reqCtx.modelOverride
+
+	if epModel := strip(endpoint.Model); epModel != "" {
+		logger.Debug("[%s] using endpoint model: %s", endpoint.Name, epModel)
+		return epModel
 	}
-	return reqCtx.requestModel
+	if ovModel := strip(reqCtx.modelOverride); ovModel != "" {
+		logger.Debug("[%s] using model override: %s", endpoint.Name, ovModel)
+		return ovModel
+	}
+	return strip(reqCtx.requestModel)
 }
 
 func shouldOverridePayloadModel(transformerName string) bool {
 	return strings.Contains(transformerName, "claude") ||
-		strings.Contains(transformerName, "openai")
+		strings.Contains(transformerName, "openai") ||
+		strings.Contains(transformerName, "1minai")
 }
 
 func detectThinkingEnabled(transformerName string, transformedBody []byte) bool {
@@ -850,13 +868,24 @@ func readResponseBody(resp *http.Response) []byte {
 	return body
 }
 
+func isASCIIHeaderValue(v string) bool {
+	for i := 0; i < len(v); i++ {
+		if v[i] > 127 {
+			return false
+		}
+	}
+	return true
+}
+
 func copyResponseHeaders(w http.ResponseWriter, resp *http.Response) {
 	for key, values := range resp.Header {
 		if key == "Content-Encoding" || key == "Content-Length" {
 			continue
 		}
 		for _, value := range values {
-			w.Header().Add(key, value)
+			if isASCIIHeaderValue(value) {
+				w.Header().Add(key, value)
+			}
 		}
 	}
 }

@@ -24,7 +24,9 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 			continue
 		}
 		for _, value := range values {
-			w.Header().Add(key, value)
+			if isASCIIHeaderValue(value) {
+				w.Header().Add(key, value)
+			}
 		}
 	}
 	if strings.TrimSpace(w.Header().Get("Content-Type")) == "" {

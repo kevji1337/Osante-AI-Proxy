@@ -71,6 +71,7 @@ var ccFactory = transformerFactory{
 	"openai2":   func(m string) transformer.Transformer { return cc.NewOpenAI2Transformer(m) },
 	"gemini":    func(m string) transformer.Transformer { return cc.NewGeminiTransformer(m) },
 	"gitlabduo": func(m string) transformer.Transformer { return cc.NewGitLabDuoTransformer(m) },
+	"1minai":    func(m string) transformer.Transformer { return cc.NewOneMinAITransformer(m) },
 }
 
 var cxChatFactory = transformerFactory{
@@ -78,6 +79,7 @@ var cxChatFactory = transformerFactory{
 	"openai":  func(m string) transformer.Transformer { return chat.NewOpenAITransformer(m) },
 	"openai2": func(m string) transformer.Transformer { return chat.NewOpenAI2Transformer(m) },
 	"gemini":  func(m string) transformer.Transformer { return chat.NewGeminiTransformer(m) },
+	"1minai":  func(m string) transformer.Transformer { return chat.NewOneMinAITransformer(m) },
 }
 
 var cxRespFactory = transformerFactory{
@@ -85,6 +87,7 @@ var cxRespFactory = transformerFactory{
 	"openai":  func(m string) transformer.Transformer { return responses.NewOpenAITransformer(m) },
 	"openai2": func(m string) transformer.Transformer { return responses.NewOpenAI2Transformer(m) },
 	"gemini":  func(m string) transformer.Transformer { return responses.NewGeminiTransformer(m) },
+	"1minai":  func(m string) transformer.Transformer { return responses.NewOneMinAITransformer(m) },
 }
 
 func buildFromFactory(f transformerFactory, label string, endpoint config.Endpoint, endpointTransformer string, effectiveModel string) (transformer.Transformer, error) {
@@ -122,6 +125,8 @@ func getTargetPath(originalPath string, endpoint config.Endpoint, transformedBod
 		return "/v1/chat/completions"
 	case "cc_openai2", "cx_resp_openai2", "cx_chat_openai2":
 		return "/v1/responses"
+	case "cc_1minai", "cx_chat_1minai", "cx_resp_1minai":
+		return "/api/features"
 	case "cc_gitlabduo":
 		// GitLab Duo Chat completions REST endpoint. The endpoint URL
 		// configured for this transformer should be the GitLab instance
@@ -151,8 +156,11 @@ func buildProxyRequest(r *http.Request, endpoint config.Endpoint, apiKey string,
 		targetPath = r.URL.Path
 	}
 
-	normalizedAPIUrl := normalizeAPIUrl(endpoint.APIUrl)
+	normalizedAPIUrl := strings.TrimRight(normalizeAPIUrl(endpoint.APIUrl), "/")
 	targetPath = normalizeTargetPathForBaseURL(normalizedAPIUrl, targetPath)
+	if targetPath != "" && !strings.HasPrefix(targetPath, "/") {
+		targetPath = "/" + targetPath
+	}
 	requestBody := transformedBody
 	if isCodexBackendBaseURL(normalizedAPIUrl) && isResponsesPath(targetPath) {
 		requestBody = ensureCodexResponsesPayload(requestBody)
@@ -184,6 +192,12 @@ func buildProxyRequest(r *http.Request, endpoint config.Endpoint, apiKey string,
 	switch transformerName {
 	case "cc_openai", "cc_openai2", "cx_chat_openai", "cx_chat_openai2", "cx_resp_openai", "cx_resp_openai2":
 		proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
+	case "cc_1minai", "cx_chat_1minai", "cx_resp_1minai":
+		proxyReq.Header.Set("API-KEY", apiKey)
+		proxyReq.Header.Set("Content-Type", "application/json")
+		proxyReq.Header.Del("Authorization")
+		proxyReq.Header.Del("x-api-key")
+		proxyReq.Header.Del("X-Api-Key")
 	case "cc_gitlabduo":
 		// GitLab accepts both PRIVATE-TOKEN (PAT) and Authorization: Bearer
 		// (PAT or OAuth) — set both so any kind of GitLab token works.
@@ -280,18 +294,27 @@ func normalizeTargetPathForBaseURL(baseURL, targetPath string) string {
 
 	cleanPath := path.Clean(strings.TrimSpace(parsed.Path))
 	isCodexBackend := strings.HasSuffix(cleanPath, "/backend-api/codex")
-	if !isCodexBackend {
-		return targetPath
+	if isCodexBackend {
+		switch strings.TrimSpace(targetPath) {
+		case "/v1/responses":
+			return "/responses"
+		case "/v1/responses/compact":
+			return "/responses/compact"
+		default:
+			return targetPath
+		}
 	}
 
-	switch strings.TrimSpace(targetPath) {
-	case "/v1/responses":
-		return "/responses"
-	case "/v1/responses/compact":
-		return "/responses/compact"
-	default:
-		return targetPath
+	if targetPath == "/api/features" {
+		if strings.HasSuffix(cleanPath, "/api/features") {
+			return ""
+		}
+		if strings.HasSuffix(cleanPath, "/api") {
+			return "/features"
+		}
 	}
+
+	return targetPath
 }
 
 func isCodexBackendBaseURL(baseURL string) bool {

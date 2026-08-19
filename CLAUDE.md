@@ -11,7 +11,8 @@ Core features:
 - Multi-endpoint rotation with automatic failover
 - Token Pool only (single `api_key` mode removed from the UI; legacy endpoints auto-migrate on startup)
 - HTTP 402 "usage limit reached" failover — token-level cooldown inside the pool, endpoint-level cooldown only when no pool is in play
-- API format conversion (Claude / OpenAI / OpenAI-Responses / Gemini)
+- API format conversion (Claude / OpenAI / OpenAI-Responses / Gemini / 1min.AI)
+- 1min.AI transformer (`1minai`): converts Claude / OpenAI / Responses conversations into 1min.AI CODE_GENERATOR prompt and returns responses (with synthesized SSE streaming for stream=true). Note: 1min.AI CODE_GENERATOR returns plain text and does not support structured tool-use / tool calls; tool results in context are serialized as plain text.
 - English-only web UI, no auth (loopback only by design)
 - In-memory log ring exposed at `/api/logs` + Logs tab in the UI
 

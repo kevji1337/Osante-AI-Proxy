@@ -136,6 +136,27 @@ func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey stri
 		url = fmt.Sprintf("%s/api/v4/version", endpoint.APIUrl)
 		reqBody = nil
 		err = nil
+	case "1minai":
+		baseURL := strings.TrimRight(normalizeAPIUrl(endpoint.APIUrl), "/")
+		if strings.HasSuffix(baseURL, "/api/features") {
+			url = baseURL
+		} else if strings.HasSuffix(baseURL, "/api") {
+			url = baseURL + "/features"
+		} else {
+			url = baseURL + "/api/features"
+		}
+		model := endpoint.Model
+		if model == "" {
+			model = "gpt-4o"
+		}
+		reqBody, err = json.Marshal(map[string]interface{}{
+			"type":  "CODE_GENERATOR",
+			"model": model,
+			"promptObject": map[string]interface{}{
+				"prompt":    "Ping",
+				"webSearch": false,
+			},
+		})
 	default:
 		return "", fmt.Errorf("unsupported transformer: %s", endpoint.Transformer)
 	}
@@ -179,6 +200,8 @@ func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey stri
 		// GitLab accepts both PRIVATE-TOKEN (PAT) and Authorization: Bearer.
 		req.Header.Set("PRIVATE-TOKEN", apiKey)
 		req.Header.Set("Authorization", "Bearer "+apiKey)
+	case "1minai":
+		req.Header.Set("API-KEY", apiKey)
 	}
 
 	client := &http.Client{
@@ -252,6 +275,39 @@ func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey stri
 						}
 					}
 				}
+			}
+		}
+	case "1minai":
+		var minResp struct {
+			AiRecord struct {
+				Status         string `json:"status"`
+				AiRecordDetail struct {
+					ResultObject []interface{} `json:"resultObject"`
+				} `json:"aiRecordDetail"`
+			} `json:"aiRecord"`
+			Message string      `json:"message"`
+			Error   interface{} `json:"error"`
+		}
+		if err := json.Unmarshal(body, &minResp); err == nil {
+			var parts []string
+			for _, item := range minResp.AiRecord.AiRecordDetail.ResultObject {
+				if s, ok := item.(string); ok && s != "" {
+					parts = append(parts, s)
+				} else if item != nil {
+					parts = append(parts, fmt.Sprint(item))
+				}
+			}
+			if len(parts) > 0 {
+				return strings.Join(parts, "\n"), nil
+			}
+			if minResp.AiRecord.Status != "" && !strings.EqualFold(minResp.AiRecord.Status, "SUCCESS") {
+				return "", fmt.Errorf("1min.AI status: %s", minResp.AiRecord.Status)
+			}
+			if minResp.Message != "" {
+				return minResp.Message, nil
+			}
+			if minResp.Error != nil {
+				return "", fmt.Errorf("1min.AI error: %v", minResp.Error)
 			}
 		}
 	}
@@ -431,6 +487,8 @@ func (h *Handler) fetchModelsFromProvider(apiUrl, apiKey, transformer string) ([
 			"GPT-5.4-Nano - OpenAI",
 			"GPT-5.5 - OpenAI",
 		}, nil
+	case "1minai":
+		return nil, fmt.Errorf("model list fetching is not supported for 1min.AI (please enter model name manually)")
 	default:
 		return nil, fmt.Errorf("unsupported transformer: %s", transformer)
 	}

@@ -12,7 +12,7 @@
 
 ## What this is
 
-Osante Proxy is a local HTTP proxy that sits between AI-powered developer tools and the upstream providers. It speaks the **Anthropic `/v1/messages`** wire format on the front side, and translates to whatever the backend wants on the other side: Anthropic, OpenAI / OpenAI Responses, Google Gemini — and now **GitLab Duo Chat Workflow**.
+Osante Proxy is a local HTTP proxy that sits between AI-powered developer tools and the upstream providers. It speaks the **Anthropic `/v1/messages`** wire format on the front side, and translates to whatever the backend wants on the other side: Anthropic, OpenAI / OpenAI Responses, Google Gemini, **GitLab Duo Chat Workflow**, and **1min.AI**.
 
 The flagship feature is the **GitLab Duo transformer**: a clean-room implementation of the same WebSocket-backed Workflow protocol that the official `duo` CLI uses, so Claude Code (which natively only speaks Anthropic) can drive your GitLab Duo subscription as if it were Claude. Conversation history, system prompts, model selection (Claude / Sonnet / Opus / Gemini / GPT-5.x variants exposed by GitLab Duo), per-word SSE streaming and Esc-to-cancel all work end-to-end.
 
@@ -23,10 +23,11 @@ It's a personal fork of [ccNexus](https://github.com/lich0821/ccNexus), trimmed 
 ## Highlights
 
 - **GitLab Duo support for Claude Code.** New `gitlabduo` transformer drives the real `/api/v4/ai/duo_workflows/*` REST + WebSocket protocol. JSON `ClientEvent` framing, `agent_privileges` workflow, model picker, per-word SSE streaming, Esc/Ctrl+C cancellation, dedup, retry. See [GitLab Duo setup](#gitlab-duo-setup).
+- **1min.AI native transformer (`1minai`).** Connects to `https://api.1min.ai/api/features` (CODE_GENERATOR), flattens conversation context/system prompt into prompt, and provides synthesized SSE streaming. *(Note: 1min.AI CODE_GENERATOR produces plain text answers and does not have native tool calling; tool metadata is flattened into text).*
 - **Token Pool is the only auth mode.** LRU rotation across a pool of tokens. Automatic cooldown on `402` rate limits with reset time parsed from the response (fallback 5 hours). Permanent deactivation on `insufficient credits` 403s with the reason surfaced in the UI.
-- **Multi-provider transformers.** Anthropic native, OpenAI / OpenAI Responses, Gemini, and GitLab Duo — all behind the same Anthropic-shaped front door, so Claude Code or Codex CLI don't need to know which one is in use.
+- **Multi-provider transformers.** Anthropic native, OpenAI / OpenAI Responses, Gemini, GitLab Duo, and 1min.AI — all behind the same Anthropic/OpenAI-shaped front door.
 - **Embedded web admin.** No auth, loopback-only by design. Add endpoints, paste token pools, fetch model lists, test connectivity, watch live logs, see per-token usage and cooldown countdowns.
-- **Per-word SSE streaming** so output renders progressively in Claude Code's terminal even when the upstream replies in one shot (e.g. GitLab Duo).
+- **Per-word SSE streaming** so output renders progressively in client terminals even when the upstream replies in one shot (e.g. GitLab Duo, 1min.AI).
 - **Pure Go, no CGO.** SQLite via `modernc.org/sqlite`. Single static binary on every platform.
 
 ## Quick start

@@ -185,6 +185,14 @@ func (p *Proxy) getDefaultModels(ep config.Endpoint) []ModelInfo {
 		}
 		ownedBy = "openai"
 
+	case "1minai":
+		if ep.Model != "" {
+			modelID = ep.Model
+		} else {
+			modelID = "gpt-4o"
+		}
+		ownedBy = "1minai"
+
 	default:
 		// Fallback for any other transformer
 		if ep.Model != "" {

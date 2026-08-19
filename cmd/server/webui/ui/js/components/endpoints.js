@@ -14,6 +14,29 @@ class Endpoints {
         this.draggedIndex = null;
         this.currentTokenPoolEndpoint = null;
         this.refreshTimer = null;
+        this.healthData = this.loadHealthData();
+        this.isPingingAll = false;
+    }
+
+    loadHealthData() {
+        try {
+            return JSON.parse(localStorage.getItem('osante_health_data') || '{}');
+        } catch {
+            return {};
+        }
+    }
+
+    saveHealthRecord(name, record) {
+        this.healthData[name] = record;
+        try {
+            localStorage.setItem('osante_health_data', JSON.stringify(this.healthData));
+        } catch (e) {
+            console.error('Failed to persist health data:', e);
+        }
+    }
+
+    getHealthRecord(name) {
+        return this.healthData[name] || null;
     }
 
     async render() {
@@ -21,10 +44,17 @@ class Endpoints {
             <div class="endpoints">
                 <div class="flex-between mb-3">
                     <h1>${t('endpoints.title')}</h1>
-                    <button class="btn btn-primary" id="add-endpoint-btn">
-                        <span>+ ${t('endpoints.addEndpoint')}</span>
-                    </button>
+                    <div style="display: flex; align-items: center; gap: 0.65rem;">
+                        <button class="btn btn-secondary" id="ping-all-top-btn" title="Check Health & Latency for all enabled endpoints">
+                            <span>⚡ ${t('endpoints.pingAll')}</span>
+                        </button>
+                        <button class="btn btn-primary" id="add-endpoint-btn">
+                            <span>+ ${t('endpoints.addEndpoint')}</span>
+                        </button>
+                    </div>
                 </div>
+
+                <div id="health-monitor-container"></div>
 
                 <div class="card">
                     <div class="card-body">
@@ -35,6 +65,10 @@ class Endpoints {
         `;
 
         document.getElementById('add-endpoint-btn').addEventListener('click', () => this.showAddModal());
+        const pingTopBtn = document.getElementById('ping-all-top-btn');
+        if (pingTopBtn) {
+            pingTopBtn.addEventListener('click', () => this.pingAllEndpoints());
+        }
         this.installModalDismissHandlers();
 
         await this.loadEndpoints();
@@ -76,7 +110,7 @@ class Endpoints {
                 this.stopAutoRefresh();
                 return;
             }
-            if (this.draggedIndex !== null) {
+            if (this.draggedIndex !== null || this.isPingingAll) {
                 return;
             }
             const modal = document.getElementById('modal-container');
@@ -121,8 +155,73 @@ class Endpoints {
         }
     }
 
+    renderHealthMonitorHtml() {
+        const enabledEndpoints = this.endpoints.filter(ep => ep.enabled);
+        if (enabledEndpoints.length === 0) return '';
+
+        let totalLatency = 0;
+        let testedCount = 0;
+        let healthyCount = 0;
+        let latestTimestamp = 0;
+
+        enabledEndpoints.forEach(ep => {
+            const h = this.getHealthRecord(ep.name);
+            if (h && h.timestamp) {
+                if (h.timestamp > latestTimestamp) latestTimestamp = h.timestamp;
+                if (h.success) {
+                    healthyCount++;
+                    if (h.latency > 0) {
+                        totalLatency += h.latency;
+                        testedCount++;
+                    }
+                }
+            }
+        });
+
+        const avgLatency = testedCount > 0 ? Math.round(totalLatency / testedCount) : 0;
+        const lastCheckedStr = latestTimestamp > 0
+            ? new Date(latestTimestamp).toLocaleTimeString()
+            : '--:--:--';
+
+        const isFullyHealthy = healthyCount === enabledEndpoints.length && enabledEndpoints.length > 0;
+        const healthBadgeClass = isFullyHealthy ? 'badge-success' : (healthyCount > 0 ? 'badge-warning' : 'badge-danger');
+        const healthText = isFullyHealthy ? (t('endpoints.allOperational') || 'All Operational') : `${healthyCount}/${enabledEndpoints.length} ${t('endpoints.operational') || 'Operational'}`;
+
+        return `
+            <div class="health-monitor-bar">
+                <div class="health-stats-group">
+                    <div class="health-stat-item">
+                        <span class="health-stat-label">System Health</span>
+                        <span class="badge ${healthBadgeClass}">${healthText}</span>
+                    </div>
+                    <div class="health-stat-item">
+                        <span class="health-stat-label">${t('endpoints.avgLatency') || 'Avg Latency'}</span>
+                        <span class="health-stat-val" id="health-avg-latency">${avgLatency > 0 ? avgLatency + 'ms' : '--'}</span>
+                    </div>
+                    <div class="health-stat-item">
+                        <span class="health-stat-label">${t('endpoints.lastChecked') || 'Last Checked'}</span>
+                        <span class="health-stat-val text-muted" id="health-last-checked" style="font-size: 12px;">${lastCheckedStr}</span>
+                    </div>
+                </div>
+                <div class="health-actions">
+                    <button class="btn btn-xs btn-secondary" id="ping-all-bar-btn" ${this.isPingingAll ? 'disabled' : ''}>
+                        <span>${this.isPingingAll ? (t('endpoints.pinging') || 'Pinging...') : '⚡ ' + (t('endpoints.pingAll') || 'Ping All')}</span>
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
     renderTable() {
         const container = document.getElementById('endpoints-table');
+        const monitorContainer = document.getElementById('health-monitor-container');
+        if (monitorContainer) {
+            monitorContainer.innerHTML = this.renderHealthMonitorHtml();
+            const barBtn = document.getElementById('ping-all-bar-btn');
+            if (barBtn) {
+                barBtn.addEventListener('click', () => this.pingAllEndpoints());
+            }
+        }
 
         if (this.endpoints.length === 0) {
             container.innerHTML = `
@@ -153,6 +252,7 @@ class Endpoints {
                         <tr>
                             <th style="width: 30px;"></th>
                             <th>${t('common.name')}</th>
+                            <th style="width: 110px;">${t('endpoints.latency') || 'Latency'}</th>
                             <th>${t('endpoints.apiUrl')}</th>
                             <th>${t('endpoints.transformer')}</th>
                             <th>${t('endpoints.model')}</th>
@@ -175,16 +275,27 @@ class Endpoints {
 
     renderEndpointRow(ep, index) {
         const isCurrentEndpoint = ep.name === this.currentEndpoint;
-        const testStatus = this.getTestStatus(ep.name);
-        let testStatusIcon = '⚠️';
-        let testStatusTitle = t('endpoints.notTested');
+        const health = this.getHealthRecord(ep.name);
 
-        if (testStatus === true) {
-            testStatusIcon = '✅';
-            testStatusTitle = t('endpoints.testPassed');
-        } else if (testStatus === false) {
-            testStatusIcon = '❌';
-            testStatusTitle = t('endpoints.testFailed');
+        let latencyPillHtml = '';
+        if (health) {
+            if (health.loading) {
+                latencyPillHtml = `<button class="health-pill health-pill-loading ping-single-btn" data-name="${this.escapeHtml(ep.name)}" title="Testing..."><span class="pulse-dot"></span> ...</button>`;
+            } else if (health.success) {
+                let pillCls = 'health-pill-fast';
+                if (health.latency > 1000) {
+                    pillCls = 'health-pill-slow';
+                } else if (health.latency > 400) {
+                    pillCls = 'health-pill-medium';
+                }
+                const timeStr = health.timestamp ? new Date(health.timestamp).toLocaleTimeString() : '';
+                latencyPillHtml = `<button class="health-pill ${pillCls} ping-single-btn" data-name="${this.escapeHtml(ep.name)}" title="Latency: ${health.latency}ms • Last: ${timeStr} • Click to Ping"><span class="pulse-dot"></span> ${health.latency}ms</button>`;
+            } else {
+                const err = health.error || 'Failed';
+                latencyPillHtml = `<button class="health-pill health-pill-slow ping-single-btn" data-name="${this.escapeHtml(ep.name)}" title="Error: ${this.escapeHtml(err)} • Click to Ping"><span class="pulse-dot"></span> Error</button>`;
+            }
+        } else {
+            latencyPillHtml = `<button class="health-pill health-pill-idle ping-single-btn" data-name="${this.escapeHtml(ep.name)}" title="Click to Ping"><span class="pulse-dot"></span> ⚡ Ping</button>`;
         }
 
         return `
@@ -192,46 +303,50 @@ class Endpoints {
                 <td style="cursor: grab; text-align: center;">⋮⋮</td>
                 <td>
                     <strong>${this.escapeHtml(ep.name)}</strong>
-                    <span title="${testStatusTitle}" style="margin-left: 5px;">${testStatusIcon}</span>
                     ${isCurrentEndpoint ? `<span class="badge badge-primary" style="margin-left: 5px;">${t('endpoints.current')}</span>` : ''}
                 </td>
                 <td>
-                    <code style="font-size: 12px;">${this.escapeHtml(ep.apiUrl)}</code>
-                    <button class="btn-icon copy-btn" data-copy="${this.escapeHtml(ep.apiUrl)}" title="${t('endpoints.copyUrl')}">
-                        📋
-                    </button>
+                    ${latencyPillHtml}
+                </td>
+                <td>
+                    <div style="display: flex; align-items: center; gap: 4px; max-width: 220px;">
+                        <code style="font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;" title="${this.escapeHtml(ep.apiUrl)}">${this.escapeHtml(ep.apiUrl)}</code>
+                        <button class="btn-icon copy-btn" data-copy="${this.escapeHtml(ep.apiUrl)}" title="${t('endpoints.copyUrl')}" style="padding: 2px 5px; font-size: 11px; flex-shrink: 0;">
+                            📋
+                        </button>
+                    </div>
                 </td>
                 <td>${getTransformerLabel(ep.transformer)}</td>
                 <td>${this.escapeHtml(ep.model || '-')}</td>
                 <td>${this.renderTokenPoolSummary(this.tokenPools[ep.name])}</td>
                 <td>${this.renderStatusCell(ep)}</td>
-                <td>
-                    <div class="flex gap-2">
+                <td class="actions-cell">
+                    <div class="endpoint-actions-group">
                         ${ep.enabled && !isCurrentEndpoint ? `
-                            <button class="btn btn-sm btn-secondary switch-btn" data-name="${this.escapeHtml(ep.name)}" title="${t('endpoints.switchToEndpoint')}">
+                            <button class="btn btn-xs btn-secondary switch-btn" data-name="${this.escapeHtml(ep.name)}" title="${t('endpoints.switchToEndpoint')}">
                                 ${t('common.switch')}
                             </button>
                         ` : ''}
-                        <button class="btn btn-sm btn-secondary test-btn" data-name="${this.escapeHtml(ep.name)}">
+                        <button class="btn btn-xs btn-secondary test-btn" data-name="${this.escapeHtml(ep.name)}" title="${t('common.test')}">
                             ${t('common.test')}
                         </button>
-                        <button class="btn btn-sm btn-secondary token-pool-btn" data-name="${this.escapeHtml(ep.name)}">
-                            ${t('endpoints.tokenPoolManagement')}
+                        <button class="btn btn-xs btn-secondary token-pool-btn" data-name="${this.escapeHtml(ep.name)}" title="${t('endpoints.tokenPoolManagement')}">
+                            ${t('endpoints.tokenPool')}
                         </button>
-                        <label class="toggle-switch">
+                        <label class="toggle-switch" title="Toggle Endpoint">
                             <input type="checkbox" class="toggle-endpoint" data-name="${this.escapeHtml(ep.name)}" ${ep.enabled ? 'checked' : ''}>
                             <span class="toggle-slider"></span>
                         </label>
-                        <button class="btn btn-sm btn-secondary edit-btn" data-name="${this.escapeHtml(ep.name)}">
+                        <button class="btn btn-xs btn-secondary edit-btn" data-name="${this.escapeHtml(ep.name)}" title="${t('common.edit')}">
                             ${t('common.edit')}
                         </button>
-                        <button class="btn btn-sm btn-secondary clone-btn" data-name="${this.escapeHtml(ep.name)}">
+                        <button class="btn btn-xs btn-secondary clone-btn" data-name="${this.escapeHtml(ep.name)}" title="${t('common.clone')}">
                             ${t('common.clone')}
                         </button>
-                        <button class="btn btn-sm btn-secondary copy-config-btn" data-name="${this.escapeHtml(ep.name)}" title="${t('endpoints.copyConfig')}">
-                            ${t('endpoints.copyConfig')}
+                        <button class="btn btn-xs btn-secondary copy-config-btn" data-name="${this.escapeHtml(ep.name)}" title="${t('endpoints.copyConfig')}">
+                            Config
                         </button>
-                        <button class="btn btn-sm btn-danger delete-btn" data-name="${this.escapeHtml(ep.name)}">
+                        <button class="btn btn-xs btn-danger delete-btn" data-name="${this.escapeHtml(ep.name)}" title="${t('common.delete')}">
                             ${t('common.delete')}
                         </button>
                     </div>
@@ -301,10 +416,9 @@ class Endpoints {
         }
 
         return `
-            <div style="font-size: 12px; line-height: 1.4;">
+            <div style="font-size: 11px; line-height: 1.35; white-space: nowrap;">
                 <div>${t('endpoints.total')}: <strong>${pool.total}</strong></div>
-                <div>A:${pool.active || 0} E:${pool.expiring || 0} X:${pool.expired || 0} I:${pool.invalid || 0}</div>
-                <div>C:${pool.cooldown || 0} R:${pool.needRefresh || 0} D:${pool.disabled || 0}</div>
+                <div style="color: var(--text-dim); font-size: 10px;">A:${pool.active || 0} E:${pool.expiring || 0} C:${pool.cooldown || 0}</div>
             </div>
         `;
     }
@@ -348,6 +462,14 @@ class Endpoints {
         // Copy buttons
         document.querySelectorAll('.copy-btn').forEach(btn => {
             btn.addEventListener('click', () => this.copyToClipboard(btn.dataset.copy, btn));
+        });
+
+        // Ping single buttons
+        document.querySelectorAll('.ping-single-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.pingSingleEndpoint(btn.dataset.name);
+            });
         });
 
         // Copy-config buttons (per-row Claude/Codex client config snippet).
@@ -604,6 +726,7 @@ class Endpoints {
                                     <option value="openai2" ${endpoint?.transformer === 'openai2' ? 'selected' : ''}>${t('transformers.openai2')}</option>
                                     <option value="gemini" ${endpoint?.transformer === 'gemini' ? 'selected' : ''}>${t('transformers.gemini')}</option>
                                     <option value="gitlabduo" ${endpoint?.transformer === 'gitlabduo' ? 'selected' : ''}>${t('transformers.gitlabduo')}</option>
+                                    <option value="1minai" ${endpoint?.transformer === '1minai' ? 'selected' : ''}>${t('transformers.1minai')}</option>
                                     <option value="deepseek" ${endpoint?.transformer === 'deepseek' ? 'selected' : ''}>${t('transformers.deepseek')}</option>
                                 </select>
                             </div>
@@ -792,6 +915,83 @@ class Endpoints {
         }
     }
 
+    async pingSingleEndpoint(name) {
+        try {
+            this.saveHealthRecord(name, { loading: true });
+            this.renderTable();
+            const result = await api.testEndpoint(name);
+            this.saveHealthRecord(name, {
+                success: !!result.success,
+                latency: result.latency || 0,
+                error: result.error || null,
+                timestamp: Date.now(),
+                loading: false
+            });
+            this.saveTestStatus(name, !!result.success);
+            if (result.success) {
+                notifications.success(`${name}: ${result.latency}ms`);
+            } else {
+                notifications.error(`${name}: ${result.error || 'Failed'}`);
+            }
+            this.renderTable();
+        } catch (error) {
+            this.saveHealthRecord(name, {
+                success: false,
+                latency: 0,
+                error: error.message,
+                timestamp: Date.now(),
+                loading: false
+            });
+            this.saveTestStatus(name, false);
+            notifications.error(`${name}: ${error.message}`);
+            this.renderTable();
+        }
+    }
+
+    async pingAllEndpoints() {
+        const enabled = this.endpoints.filter(ep => ep.enabled);
+        if (enabled.length === 0) {
+            notifications.warning('No enabled endpoints to ping');
+            return;
+        }
+
+        this.isPingingAll = true;
+        enabled.forEach(ep => {
+            this.saveHealthRecord(ep.name, { ...(this.getHealthRecord(ep.name) || {}), loading: true });
+        });
+        this.renderTable();
+
+        try {
+            notifications.info(t('endpoints.pinging') || 'Pinging all endpoints...');
+            await Promise.allSettled(enabled.map(async ep => {
+                try {
+                    const result = await api.testEndpoint(ep.name);
+                    this.saveHealthRecord(ep.name, {
+                        success: !!result.success,
+                        latency: result.latency || 0,
+                        error: result.error || null,
+                        timestamp: Date.now(),
+                        loading: false
+                    });
+                    this.saveTestStatus(ep.name, !!result.success);
+                } catch (err) {
+                    this.saveHealthRecord(ep.name, {
+                        success: false,
+                        latency: 0,
+                        error: err.message,
+                        timestamp: Date.now(),
+                        loading: false
+                    });
+                    this.saveTestStatus(ep.name, false);
+                }
+            }));
+            notifications.success('Health check complete!');
+        } finally {
+            this.isPingingAll = false;
+            this.renderTable();
+        }
+    }
+
     async testEndpoint(name) {
         try {
             notifications.info(t('endpoints.testing'));
@@ -799,16 +999,37 @@ class Endpoints {
 
             if (result.success) {
                 this.saveTestStatus(name, true);
+                this.saveHealthRecord(name, {
+                    success: true,
+                    latency: result.latency || 0,
+                    error: null,
+                    timestamp: Date.now(),
+                    loading: false
+                });
                 notifications.success(`${t('notifications.testSuccessful')} ${result.latency}ms`);
                 this.showTestResultModal(name, result);
                 await this.loadEndpoints(); // Refresh to show test status
             } else {
                 this.saveTestStatus(name, false);
+                this.saveHealthRecord(name, {
+                    success: false,
+                    latency: result.latency || 0,
+                    error: result.error || 'Failed',
+                    timestamp: Date.now(),
+                    loading: false
+                });
                 notifications.error(`${t('notifications.testFailed')} ${result.error}`);
                 await this.loadEndpoints(); // Refresh to show test status
             }
         } catch (error) {
             this.saveTestStatus(name, false);
+            this.saveHealthRecord(name, {
+                success: false,
+                latency: 0,
+                error: error.message,
+                timestamp: Date.now(),
+                loading: false
+            });
             notifications.error(`${t('endpoints.failedToTest')}: ${error.message}`);
             await this.loadEndpoints(); // Refresh to show test status
         }

@@ -86,8 +86,74 @@ function initRealtime() {
     };
 }
 
+// Single tab coordinator to prevent multiple duplicate tabs
+function initSingleTabCoordinator() {
+    if (!('BroadcastChannel' in window)) {
+        return;
+    }
+
+    const channel = new BroadcastChannel('osante_single_tab_channel');
+    const tabId = 'tab_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+    let isPrimary = false;
+
+    // Check if another tab exists
+    channel.postMessage({ type: 'PING', senderTabId: tabId });
+
+    channel.onmessage = (event) => {
+        const msg = event.data;
+        if (!msg) return;
+
+        if (msg.type === 'PING' && msg.senderTabId !== tabId) {
+            // We are an existing tab, announce ourselves
+            channel.postMessage({ type: 'PONG', targetTabId: msg.senderTabId });
+            
+            // Wake up / re-focus cue: flash title
+            const origTitle = document.title;
+            document.title = '>>> OSANTE // proxy <<<';
+            setTimeout(() => { document.title = origTitle; }, 1500);
+
+            // Re-sync with proxy if needed
+            if (router && router.currentView) {
+                router.handleRoute();
+            }
+        } else if (msg.type === 'PONG' && msg.targetTabId === tabId) {
+            // Another tab is already active!
+            console.log('[Osante] Existing tab detected. Closing duplicate tab.');
+            window.close();
+
+            // If browser blocks window.close() for externally opened tabs, render notice
+            setTimeout(() => {
+                const appEl = document.getElementById('app');
+                if (appEl && !isPrimary) {
+                    appEl.innerHTML = `
+                        <div style="display:flex; align-items:center; justify-content:center; min-height:100vh; width:100%; font-family:var(--font-mono); color:var(--text-primary); padding:2rem; box-sizing:border-box;">
+                            <div style="border:1px dashed var(--border-color); padding:2.5rem; background:var(--bg-secondary); max-width:480px; text-align:center;">
+                                <h2 style="color:var(--acid); margin-bottom:1rem; font-size:1.4rem;">[ SESSION ALREADY OPEN ]</h2>
+                                <p style="margin-bottom:1.5rem; color:var(--text-secondary); line-height:1.6; font-size:13px;">
+                                    Osante Web UI is already open in another tab in your browser.
+                                </p>
+                                <button id="takeover-tab-btn" class="btn btn-primary" style="margin-bottom:1rem; width:100%;">
+                                    Use This Tab Instead
+                                </button>
+                                <div style="font-size:11px; color:var(--text-dim);">
+                                    You can close this tab safely.
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                    document.getElementById('takeover-tab-btn')?.addEventListener('click', () => {
+                        isPrimary = true;
+                        location.reload();
+                    });
+                }
+            }, 100);
+        }
+    };
+}
+
 // Initialize application
 function init() {
+    initSingleTabCoordinator();
     router.register('dashboard', dashboard);
     router.register('endpoints', endpoints);
     router.register('stats', stats);

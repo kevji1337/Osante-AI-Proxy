@@ -43,6 +43,7 @@ export function getTransformerLabel(transformer) {
         'openai2': 'OpenAI Responses',
         'gemini': 'Gemini',
         'gitlabduo': 'GitLab Duo',
+        '1minai': '1min.AI',
         'deepseek': 'DeepSeek'
     };
     return labels[transformer] || transformer;

@@ -65,7 +65,9 @@ func (p *Proxy) handleNonStreamingResponse(w http.ResponseWriter, resp *http.Res
 			continue
 		}
 		for _, value := range values {
-			w.Header().Add(key, value)
+			if isASCIIHeaderValue(value) {
+				w.Header().Add(key, value)
+			}
 		}
 	}
 

@@ -103,8 +103,8 @@ export default {
         cloneEndpoint: 'Clone',
         remark: 'Remark',
         fetchModels: 'Fetch Models',
-        fetchModelsHint: 'Click "Fetch Models" to load available models from the API',
-        modelPlaceholder: 'gpt-4, gemini-pro, etc.',
+        fetchModelsHint: 'Optional. Leave blank to let client / OmniRoute specify model dynamically.',
+        modelPlaceholder: 'Optional — e.g. gpt-5.6-sol (or pass dynamically from app)',
         apiKeyPlaceholder: 'sk-...',
         apiUrlPlaceholder: 'https://api.example.com',
         keepExistingKey: 'Leave as **** to keep existing key',
@@ -116,6 +116,14 @@ export default {
         testFailed: 'Test failed: ',
         testResult: 'Test Result',
         latency: 'Latency',
+        healthMonitor: 'Health & Latency Monitor',
+        pingAll: '⚡ Ping All',
+        pinging: 'Pinging...',
+        avgLatency: 'Avg Latency',
+        allOperational: 'All Operational',
+        operational: 'Operational',
+        degraded: 'Degraded',
+        lastChecked: 'Last checked',
         response: 'Response',
         noResponse: 'No response',
         confirmDelete: 'Are you sure you want to delete endpoint "{name}"?',
@@ -257,6 +265,7 @@ export default {
         openai2: 'OpenAI Responses',
         gemini: 'Gemini',
         gitlabduo: 'GitLab Duo',
+        '1minai': '1min.AI',
         deepseek: 'DeepSeek'
     }
 };

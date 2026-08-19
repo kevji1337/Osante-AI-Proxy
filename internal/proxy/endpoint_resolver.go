@@ -61,14 +61,23 @@ func (r *EndpointResolver) ResolveEndpoint(req *http.Request, bodyBytes []byte) 
 	}
 	modelName := strings.TrimSpace(streamReq.Model)
 
-	if modelName != "" && strings.HasPrefix(modelName, "@") {
-		endpointName, modelOverride := r.parseEndpointFromModel(modelName)
-		endpoint := r.findEndpointByName(endpointName, endpoints)
-		if endpoint == nil {
-			return nil, "", fmt.Errorf("specified endpoint %q does not exist or is disabled", endpointName)
+	if modelName != "" {
+		if strings.HasPrefix(modelName, "@") {
+			endpointName, modelOverride := r.parseEndpointFromModel(modelName)
+			endpoint := r.findEndpointByName(endpointName, endpoints)
+			if endpoint == nil {
+				return nil, "", fmt.Errorf("specified endpoint %q does not exist or is disabled", endpointName)
+			}
+			logger.Debug("[Resolver] endpoint specified via model prefix: %s, model: %s", endpointName, modelOverride)
+			return endpoint, modelOverride, nil
+		} else if strings.Contains(modelName, "/") {
+			endpointName, modelOverride := r.parseEndpointFromModel(modelName)
+			endpoint := r.findEndpointByName(endpointName, endpoints)
+			if endpoint != nil {
+				logger.Debug("[Resolver] endpoint specified via model slash prefix: %s, model: %s", endpointName, modelOverride)
+				return endpoint, modelOverride, nil
+			}
 		}
-		logger.Debug("[Resolver] endpoint specified via model prefix: %s, model: %s", endpointName, modelOverride)
-		return endpoint, modelOverride, nil
 	}
 
 	// Priority 3: query parameter
@@ -97,17 +106,16 @@ func (r *EndpointResolver) parseEndpointFromHeader(req *http.Request) string {
 	return ""
 }
 
-// parseEndpointFromModel parses the @endpoint[/model] prefix:
+// parseEndpointFromModel parses the [@/provider]endpoint[/model] prefix:
 //
 //	@endpoint-name/model-name → ("endpoint-name", "model-name")
+//	endpoint-name/model-name  → ("endpoint-name", "model-name")
 //	@endpoint-name            → ("endpoint-name", "")
 func (r *EndpointResolver) parseEndpointFromModel(model string) (string, string) {
 	model = strings.TrimSpace(model)
-	if !strings.HasPrefix(model, "@") {
-		return "", ""
+	if strings.HasPrefix(model, "@") {
+		model = model[1:]
 	}
-
-	model = model[1:]
 
 	slashIndex := strings.Index(model, "/")
 	if slashIndex == -1 {
@@ -116,7 +124,7 @@ func (r *EndpointResolver) parseEndpointFromModel(model string) (string, string)
 		return endpointName, ""
 	}
 
-	// Form: @endpoint-name/model-name
+	// Form: endpoint-name/model-name
 	endpointName := strings.TrimSpace(model[:slashIndex])
 	modelName := strings.TrimSpace(model[slashIndex+1:])
 	return endpointName, modelName
