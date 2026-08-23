@@ -61,8 +61,6 @@ internal/
   storage/          SQLite (WAL) persistence: endpoints, credentials, stats, app config
   config/           configuration types + storage adapter
   logger/           leveled logging with an in-memory ring buffer (1000 entries)
-  session/          per-session context helpers
-  terminal/         terminal feature detection (used by streaming output)
   tokencount/       token counting helpers
 ```
 
@@ -75,7 +73,7 @@ internal/
 ### Key paths
 
 - Database: `~/.Osante/osante.db`
-- Default port: `52710` (legacy `3000` configs auto-migrate)
+- Default port: `12710` (legacy `3000` and `52710` configs auto-migrate; 52710 sat inside the Windows dynamic port range, where Hyper-V/WSL reservations cause WSAEACCES bind failures)
 - Auth modes: `token_pool` only — the UI doesn't expose any other
 
 ## API routes
@@ -94,7 +92,7 @@ Web admin / JSON API routes are under `/api/...` and `/ui/`.
 
 | Var                | Default                       |
 |--------------------|-------------------------------|
-| `OSANTE_PORT`      | `52710`                       |
+| `OSANTE_PORT`      | `12710`                       |
 | `OSANTE_BIND`      | `127.0.0.1` (loopback only)   |
 | `OSANTE_DATA_DIR`  | `~/.Osante`                   |
 | `OSANTE_DB_PATH`   | `$OSANTE_DATA_DIR/osante.db`  |
@@ -107,7 +105,7 @@ proxy logs a WARN on non-loopback binds.
 
 ## Dependencies
 
-- Go 1.24+
+- Go 1.27+
 - SQLite via `modernc.org/sqlite` (pure Go)
 
 ## Obsidian Memory

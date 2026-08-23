@@ -40,7 +40,7 @@ func main() {
 		logger.Error("Failed to open SQLite storage: %v", err)
 		os.Exit(1)
 	}
-	defer sqliteStorage.Close()
+	defer func() { _ = sqliteStorage.Close() }()
 
 	cfg, err := loadConfig(sqliteStorage)
 	if err != nil {
@@ -78,7 +78,7 @@ func main() {
 		deviceID = "default"
 	}
 
-	statsAdapter := storage.NewStatsStorageAdapter(sqliteStorage)
+	statsAdapter := proxy.NewSQLiteStatsStorage(sqliteStorage)
 	p := proxy.New(cfg, statsAdapter, sqliteStorage, deviceID)
 
 	// Create HTTP mux
@@ -148,12 +148,19 @@ func loadConfig(sqliteStorage *storage.SQLiteStorage) (*config.Config, error) {
 		}
 	}
 
-	// Old installs persisted port 3000 (the previous default). Bump them to the
-	// new non-standard default so we don't fight other dev services for :3000.
-	// Users who really want 3000 can override via -port / OSANTE_PORT.
-	if cfg.GetPort() == 3000 {
-		logger.Warn("Migrating persisted port 3000 → %d (set -port 3000 or OSANTE_PORT=3000 to keep the old port)", config.DefaultConfig().Port)
-		cfg.UpdatePort(config.DefaultConfig().Port)
+	// Migrate persisted ports that are known-bad defaults:
+	//
+	//   3000  - the original default; fights every other dev service on :3000.
+	//   52710 - the previous default. It sits in the Windows dynamic port range,
+	//           where Hyper-V / WSL / Docker NAT reserve shifting 100-port blocks;
+	//           landing in one makes bind fail with WSAEACCES even though nothing
+	//           is listening. config.DefaultPort is below that range.
+	//
+	// Either can be kept explicitly with -port / OSANTE_PORT.
+	if legacy := cfg.GetPort(); legacy == 3000 || legacy == 52710 {
+		logger.Warn("Migrating persisted port %d → %d (set -port %d or OSANTE_PORT=%d to keep the old port)",
+			legacy, config.DefaultPort, legacy, legacy)
+		cfg.UpdatePort(config.DefaultPort)
 		if saveErr := cfg.SaveToStorage(adapter); saveErr != nil {
 			logger.Warn("Failed to persist migrated port: %v", saveErr)
 		}
@@ -161,10 +168,20 @@ func loadConfig(sqliteStorage *storage.SQLiteStorage) (*config.Config, error) {
 	return cfg, nil
 }
 
+// applyEnvOverrides applies OSANTE_* environment overrides on top of the stored
+// configuration.
+//
+// Precedence: -port flag > OSANTE_PORT > value saved in the database. The flag
+// wins because it calls cfg.LockPort(), and UpdatePort is a no-op on a locked
+// port — that used to make OSANTE_PORT silently disappear, so say so out loud.
 func applyEnvOverrides(cfg *config.Config) {
 	if portStr := os.Getenv("OSANTE_PORT"); portStr != "" {
 		if port, err := strconv.Atoi(portStr); err == nil {
-			cfg.UpdatePort(port)
+			if cfg.IsPortLocked() {
+				logger.Warn("Ignoring OSANTE_PORT=%d: port is locked to %d by the -port flag", port, cfg.GetPort())
+			} else {
+				cfg.UpdatePort(port)
+			}
 		} else {
 			logger.Warn("Invalid OSANTE_PORT value %q: %v", portStr, err)
 		}

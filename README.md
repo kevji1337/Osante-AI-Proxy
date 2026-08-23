@@ -5,7 +5,7 @@
 [![CI](https://github.com/kevji1337/Osante-AI-Proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/kevji1337/Osante-AI-Proxy/actions/workflows/ci.yml)
 [![Release](https://github.com/kevji1337/Osante-AI-Proxy/actions/workflows/build.yml/badge.svg)](https://github.com/kevji1337/Osante-AI-Proxy/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go)](go.mod)
+[![Go Version](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go)](go.mod)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](#downloads)
 
 ---
@@ -42,7 +42,7 @@ cd Osante-AI-Proxy/cmd/server
 go build -ldflags="-s -w" -o osante-proxy .
 ```
 
-Requires Go **1.24+**.
+Requires Go **1.27+**.
 
 ### 2. Run
 
@@ -50,11 +50,11 @@ Requires Go **1.24+**.
 ./osante-proxy
 ```
 
-Listens on `127.0.0.1:52710` by default. Data dir: `~/.Osante/`, db: `~/.Osante/osante.db`.
+Listens on `127.0.0.1:12710` by default. Data dir: `~/.Osante/`, db: `~/.Osante/osante.db`.
 
 ### 3. Open the web admin
 
-<http://127.0.0.1:52710/ui/>
+<http://127.0.0.1:12710/ui/>
 
 1. Click **Add Endpoint**, pick a transformer (e.g. `gitlabduo`), set the URL (e.g. `https://gitlab.com`) and model.
 2. Click **Token Pool** on the endpoint row and paste your tokens — one per line or as JSON.
@@ -65,7 +65,7 @@ Listens on `127.0.0.1:52710` by default. Data dir: `~/.Osante/`, db: `~/.Osante/
 **Claude Code:**
 
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:52710
+export ANTHROPIC_BASE_URL=http://127.0.0.1:12710
 export ANTHROPIC_AUTH_TOKEN=anything
 claude
 ```
@@ -81,7 +81,7 @@ preferred_auth_method = "apikey"
 
 [model_providers.osante]
 name = "Osante Proxy"
-base_url = "http://127.0.0.1:52710/v1"
+base_url = "http://127.0.0.1:12710/v1"
 wire_api = "responses"
 ```
 
@@ -143,7 +143,7 @@ The wire format was reverse-engineered from the official `duo` binary (see `gitl
 
 | Var                 | Default               | Notes                             |
 |---------------------|-----------------------|-----------------------------------|
-| `OSANTE_PORT`       | `52710`               | Listen port                       |
+| `OSANTE_PORT`       | `12710`               | Listen port                       |
 | `OSANTE_DATA_DIR`   | `~/.Osante`           | Data directory                    |
 | `OSANTE_DB_PATH`    | `$OSANTE_DATA_DIR/osante.db` | SQLite db path             |
 | `OSANTE_LOG_LEVEL`  | `1` (INFO)            | `0` DEBUG / `1` INFO / `2` WARN / `3` ERROR |
@@ -172,7 +172,7 @@ cmd/server/             headless HTTP server + embedded admin Web UI
 internal/proxy/         proxy core, request pipeline, GitLab Duo handler
 internal/transformer/   per-provider request/response transformers
 internal/storage/       SQLite-backed endpoints / credentials / stats
-internal/{config,logger,session,terminal,tokencount}
+internal/{config,logger,tokencount}
 public/                 static assets (icon, etc.)
 ```
 
