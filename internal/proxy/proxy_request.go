@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kevji1337/Osante-AI-Proxy/internal/config"
 	"github.com/kevji1337/Osante-AI-Proxy/internal/logger"
@@ -184,7 +185,7 @@ func (p *Proxy) writeLastUpstreamError(w http.ResponseWriter, reqCtx *proxyReque
 // extractUpstreamErrorMessage tries to pull a human-readable error message
 // out of an upstream JSON body. Returns (message, isAnthropicShape).
 //
-// Recognised shapes:
+// Recognized shapes:
 //   - Anthropic:  {"type":"error","error":{"type":"...","message":"..."}}
 //   - FreeModel:  {"error":"Usage limit reached, will reset on today at ..."}
 //   - OpenAI:     {"error":{"message":"...","type":"...","code":"..."}}
@@ -258,19 +259,33 @@ func errTypeForStatus(status int) string {
 	return "api_error"
 }
 
+// maxProxyRequestBody bounds how much of a client request we buffer. The body is
+// held in memory for the whole retry loop and re-encoded per attempt, so an
+// unbounded ReadAll turns one oversized POST into a multiple-of-that heap spike.
+const maxProxyRequestBody = 64 << 20 // 64 MiB
+
 func (p *Proxy) newProxyRequestContext(w http.ResponseWriter, r *http.Request) (*proxyRequestContext, error) {
-	bodyBytes, err := io.ReadAll(r.Body)
+	defer func() { _ = r.Body.Close() }()
+	bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxProxyRequestBody))
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			logger.Warn("Rejecting oversized request body (limit %d bytes)", maxProxyRequestBody)
+			writeProxyError(w, http.StatusRequestEntityTooLarge, "invalid_request_error",
+				fmt.Sprintf("request body exceeds %d bytes", maxProxyRequestBody))
+			return nil, err
+		}
 		logger.Error("Failed to read request body: %v", err)
 		writeProxyError(w, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
 		return nil, err
 	}
-	defer r.Body.Close()
 
 	clientFormat := detectClientFormat(r.URL.Path)
 	logger.DebugLog("=== Proxy Request ===")
 	logger.DebugLog("Method: %s, Path: %s, ClientFormat: %s", r.Method, r.URL.Path, clientFormat)
-	logger.DebugLog("Request Body: %s", string(bodyBytes))
+	if logger.DebugEnabled() {
+		logger.DebugLog("Request Body: %s", string(bodyBytes))
+	}
 
 	// Reject anything that can't be a real LLM request before we burn an
 	// attempt against every endpoint. The proxy "/" route only handles POST
@@ -377,7 +392,12 @@ func (p *Proxy) runEndpointAttempt(w http.ResponseWriter, reqCtx *proxyRequestCo
 	}
 
 	p.logUpstreamRequest(reqCtx, attempt)
-	resp, err := sendRequest(p.getEndpointContext(attempt.endpoint.Name), attempt.proxyRequest, p.httpClient, p.config)
+	// bodyclose cannot follow the response through attempt.response into
+	// handleAttemptResponse. Every branch there consumes it: readResponseBody,
+	// handleNonStreamingResponse and handleStreamingResponse each close the body
+	// (the first two via defer), and the streaming aggregator does the same.
+	//nolint:bodyclose // closed by handleAttemptResponse on every path
+	resp, err := sendRequest(p.getEndpointContext(attempt.endpoint.Name), attempt.proxyRequest, p.httpClient, p.cfg())
 	if err != nil {
 		reqCtx.trace.SetError(err.Error())
 		return p.handleSendError(err, attempt)
@@ -414,7 +434,9 @@ func (p *Proxy) prepareEndpointAttempt(reqCtx *proxyRequestContext, attempt *end
 	reqCtx.trace.SetEndpoint(attempt.endpoint.Name, attempt.transformerName, attempt.modelName, reqCtx.useSpecificEndpoint)
 
 	logger.DebugLog("[%s] Transformer: %s", attempt.endpoint.Name, attempt.transformerName)
-	logger.DebugLog("[%s] Transformed Request: %s", attempt.endpoint.Name, string(transformedBody))
+	if logger.DebugEnabled() {
+		logger.DebugLog("[%s] Transformed Request: %s", attempt.endpoint.Name, string(transformedBody))
+	}
 
 	if reqCtx.modelOverride != "" {
 		transformedBody = overrideModelInPayload(transformedBody, reqCtx.modelOverride)
@@ -508,7 +530,7 @@ func (p *Proxy) resolveAttemptAuth(reqCtx *proxyRequestContext, attempt *endpoin
 }
 
 func (p *Proxy) logUpstreamRequest(reqCtx *proxyRequestContext, attempt *endpointAttempt) {
-	proxyLabel := strings.TrimSpace(resolveProxyURLForRequest(p.config, attempt.proxyRequest.URL))
+	proxyLabel := strings.TrimSpace(resolveProxyURLForRequest(p.cfg(), attempt.proxyRequest.URL))
 	action := "Requesting"
 	if reqCtx.streamRequested {
 		action = "Streaming"
@@ -561,6 +583,21 @@ func (p *Proxy) handleAttemptResponse(w http.ResponseWriter, reqCtx *proxyReques
 			p.finishSuccessfulAttempt(reqCtx, attempt, inputTokens, outputTokens, "")
 			return attemptResultDone
 		}
+		// The upstream said 200 but we could not turn its body into something the
+		// client understands (unknown shape, truncated JSON, bad gzip). The body
+		// is already consumed at this point, so falling through to
+		// handleFinalStatus would emit a bare 200 with an empty body — a silent
+		// success the client cannot detect or retry. handleNonStreamingResponse
+		// fails before it writes any header, so the attempt is still safe to
+		// retry: treat it as an endpoint failure and move on.
+		logger.Warn("[%s] Upstream 200 but response could not be transformed: %v", attempt.endpoint.Name, err)
+		reqCtx.trace.SetError(err.Error())
+		p.markCredentialFailure(attempt.credentialID, 0, err.Error())
+		p.recordCredentialUsage(attempt.credentialID, attempt.endpoint.Name, 0, 1, 0, 0)
+		p.recordEndpointError(attempt.endpoint.Name, truncateString(err.Error(), 200))
+		p.stats.RecordError(attempt.endpoint.Name)
+		p.markRequestInactive(attempt.endpoint.Name)
+		return attemptResultRetryNextEndpoint
 	}
 
 	if resp.StatusCode == http.StatusPaymentRequired {
@@ -582,7 +619,7 @@ func (p *Proxy) handleAttemptResponse(w http.ResponseWriter, reqCtx *proxyReques
 //   - otherwise the *endpoint* is put into cooldown and the request is retried
 //     on the next endpoint.
 //
-// Other (non usage-limit) 402s keep the prior retry behaviour. In all cases the
+// Other (non usage-limit) 402s keep the prior retry behavior. In all cases the
 // upstream error is remembered so it can be returned to the client if every
 // endpoint/token ends up exhausted.
 func (p *Proxy) handlePaymentRequired(reqCtx *proxyRequestContext, attempt *endpointAttempt) attemptResult {
@@ -655,15 +692,11 @@ func (p *Proxy) finishSuccessfulAttempt(reqCtx *proxyRequestContext, attempt *en
 	if inputTokens == 0 || outputTokens == 0 {
 		inputTokens, outputTokens = p.estimateTokens(reqCtx.bodyBytes, outputText, inputTokens, outputTokens, attempt.endpoint.Name)
 	}
-	p.stats.RecordRequest(attempt.endpoint.Name)
-	p.stats.RecordTokens(attempt.endpoint.Name, inputTokens, outputTokens)
-	p.recordCredentialUsage(attempt.credentialID, attempt.endpoint.Name, 1, 0, inputTokens, outputTokens)
-	p.markCredentialSuccess(attempt.credentialID)
+	// One UPSERT instead of two for the same daily_stats row.
+	p.stats.RecordSuccess(attempt.endpoint.Name, inputTokens, outputTokens)
+	p.recordCredentialSuccess(attempt.credentialID, attempt.endpoint.Name, inputTokens, outputTokens)
 	p.clearEndpointError(attempt.endpoint.Name)
 	p.markRequestInactive(attempt.endpoint.Name)
-	if p.onEndpointSuccess != nil {
-		p.onEndpointSuccess(attempt.endpoint.Name)
-	}
 	totalElapsed := time.Since(reqCtx.requestStart).Round(time.Millisecond)
 	logger.Debug("[%s] Requested tokens=%d/%d latency=%s cred_id=%d", attempt.endpoint.Name, inputTokens, outputTokens, totalElapsed, attempt.credentialID)
 
@@ -745,8 +778,16 @@ func (p *Proxy) handleFinalStatus(w http.ResponseWriter, reqCtx *proxyRequestCon
 			targetURL = attempt.proxyRequest.URL.String()
 		}
 		logger.Warn("[%s] Upstream Error %d [%s]: %s", attempt.endpoint.Name, resp.StatusCode, targetURL, errMsg)
-		logger.Warn("[%s] Outgoing payload was: %s", attempt.endpoint.Name, string(attempt.transformedBody))
+		// The outgoing payload is the entire conversation: system prompt, full
+		// message history, file contents, tool results. The in-memory log ring is
+		// served by the unauthenticated /api/logs and /api/logs/stream, and users
+		// are asked to paste those logs into bug reports — so WARN carries only
+		// the size. Content goes to the debug log only.
+		logger.Warn("[%s] Outgoing payload was %d bytes (enable debug logging to inspect)", attempt.endpoint.Name, len(attempt.transformedBody))
 		logger.DebugLog("[%s] Response %d: %s", attempt.endpoint.Name, resp.StatusCode, errMsg)
+		if logger.DebugEnabled() {
+			logger.DebugLog("[%s] Outgoing payload: %s", attempt.endpoint.Name, string(attempt.transformedBody))
+		}
 	}
 
 	copyResponseHeaders(w, resp)
@@ -779,9 +820,7 @@ func (p *Proxy) tryRefreshAfterAuthFailure(reqCtx *proxyRequestContext, attempt 
 func resolveAttemptModelName(reqCtx *proxyRequestContext, endpoint config.Endpoint) string {
 	strip := func(s string) string {
 		m := strings.TrimSpace(s)
-		if strings.HasPrefix(m, "@") {
-			m = strings.TrimPrefix(m, "@")
-		}
+		m = strings.TrimPrefix(m, "@")
 		if idx := strings.LastIndex(m, "/"); idx != -1 {
 			m = strings.TrimSpace(m[idx+1:])
 		}
@@ -850,7 +889,7 @@ func writeProxyError(w http.ResponseWriter, status int, errType, message string)
 		},
 	})
 	if err != nil {
-		// Marshalling a fixed map can't realistically fail; fall back to a
+		// Marshaling a fixed map can't realistically fail; fall back to a
 		// minimal hand-written JSON so the client still parses something.
 		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"api_error","message":"internal error"}}`))
 		return
@@ -859,7 +898,7 @@ func writeProxyError(w http.ResponseWriter, status int, errType, message string)
 }
 
 func readResponseBody(resp *http.Response) []byte {
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.Header.Get("Content-Encoding") == "gzip" {
 		body, _ := decompressGzip(resp.Body)
 		return body
@@ -890,11 +929,18 @@ func copyResponseHeaders(w http.ResponseWriter, resp *http.Response) {
 	}
 }
 
+// truncateString caps a string at max bytes without splitting a multi-byte
+// rune: a plain value[:max] can cut a UTF-8 sequence in half and produce
+// mojibake in logs, the trace ring and the credentials table.
 func truncateString(value string, max int) string {
 	if len(value) <= max {
 		return value
 	}
-	return value[:max] + "..."
+	cut := max
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut] + "..."
 }
 
 var errNoEnabledEndpoints = errors.New("no enabled endpoints configured")
@@ -992,6 +1038,7 @@ func extractGitLabDuoHistory(body []byte) string {
 // tool descriptions, XML tags) and keeps human-readable instructions.
 func condensedSystemPrompt(s string, maxRunes int) string {
 	var sb strings.Builder
+	runeCount := 0
 	for _, line := range strings.Split(s, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
@@ -1006,44 +1053,23 @@ func condensedSystemPrompt(s string, maxRunes int) string {
 		}
 		if sb.Len() > 0 {
 			sb.WriteString(" ")
+			runeCount++
 		}
 		sb.WriteString(trimmed)
-		if len([]rune(sb.String())) >= maxRunes {
+		// Track the rune count incrementally. Calling len([]rune(sb.String()))
+		// per line re-materialized the whole accumulated string as a rune slice
+		// every iteration, which is quadratic on the large system prompts Claude
+		// Code sends.
+		runeCount += utf8.RuneCountInString(trimmed)
+		if runeCount >= maxRunes {
 			break
 		}
 	}
-	runes := []rune(sb.String())
-	if len(runes) > maxRunes {
+	if runeCount > maxRunes {
+		runes := []rune(sb.String())
 		return string(runes[:maxRunes])
 	}
 	return sb.String()
-}
-
-// extractGitLabDuoUserText pulls the actual user question from an Anthropic
-// /v1/messages body. Claude Code wraps the real question together with a large
-// <system-reminder> block inside the last user message. We skip system-context
-// blocks and return only the human-typed text.
-func extractGitLabDuoUserText(body []byte) string {
-	var req struct {
-		Messages []struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		return ""
-	}
-	// Walk messages in reverse; for each user message try to extract the
-	// actual question (skipping system-context injections).
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role != "user" {
-			continue
-		}
-		if text := extractUserQuestion(req.Messages[i].Content); text != "" {
-			return text
-		}
-	}
-	return ""
 }
 
 // extractUserQuestion extracts the human-typed question from an Anthropic

@@ -10,19 +10,19 @@ import (
 type TracePhase string
 
 const (
-	PhaseReceived       TracePhase = "received"        // request arrived at the proxy
-	PhaseTransformed    TracePhase = "transformed"     // request body transformed for upstream
-	PhaseUpstreamSent   TracePhase = "upstream_sent"   // http.Client.Do returned headers
-	PhaseFirstByte      TracePhase = "first_byte"      // first byte of upstream body read
-	PhaseLastByte       TracePhase = "last_byte"       // upstream stream ended
-	PhaseClientSent     TracePhase = "client_sent"     // last byte forwarded to client
-	PhaseDone           TracePhase = "done"            // request finished (success or terminal failure)
+	PhaseReceived     TracePhase = "received"      // request arrived at the proxy
+	PhaseTransformed  TracePhase = "transformed"   // request body transformed for upstream
+	PhaseUpstreamSent TracePhase = "upstream_sent" // http.Client.Do returned headers
+	PhaseFirstByte    TracePhase = "first_byte"    // first byte of upstream body read
+	PhaseLastByte     TracePhase = "last_byte"     // upstream stream ended
+	PhaseClientSent   TracePhase = "client_sent"   // last byte forwarded to client
+	PhaseDone         TracePhase = "done"          // request finished (success or terminal failure)
 )
 
 // TraceMark is one (phase, monotonic ns since start) pair.
 type TraceMark struct {
-	Phase   TracePhase `json:"phase"`
-	OffsetMs int64     `json:"offset_ms"`
+	Phase    TracePhase `json:"phase"`
+	OffsetMs int64      `json:"offset_ms"`
 }
 
 // TraceRecord is a single request's timing slice. Field names are JSON
@@ -53,10 +53,10 @@ type TraceRecord struct {
 // nothing else in the proxy reads from it, so failures here must NEVER block
 // real request handling.
 type TraceRing struct {
-	mu       sync.RWMutex
-	cap      int
-	records  []TraceRecord
-	nextID   atomic.Int64
+	mu      sync.RWMutex
+	cap     int
+	records []TraceRecord
+	nextID  atomic.Int64
 }
 
 // NewTraceRing constructs a ring with the given capacity (records older than
@@ -196,9 +196,11 @@ func (h *TraceHandle) Finalize() {
 	if h == nil || h.done {
 		return
 	}
-	h.done = true
 	h.rec.TotalMs = time.Since(h.start).Milliseconds()
+	// Mark before flipping done: Mark() short-circuits on h.done, so setting it
+	// first meant the PhaseDone mark was never actually recorded.
 	h.Mark(PhaseDone)
+	h.done = true
 	if h.ring != nil {
 		h.ring.push(h.rec)
 	}

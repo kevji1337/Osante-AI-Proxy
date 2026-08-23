@@ -13,23 +13,23 @@ import (
 
 // healthEndpointStatus is the per-endpoint slice of /health output.
 type healthEndpointStatus struct {
-	Name                   string `json:"name"`
-	Enabled                bool   `json:"enabled"`
-	Transformer            string `json:"transformer,omitempty"`
-	InCooldown             bool   `json:"in_cooldown"`
-	CooldownRemainingSec   int64  `json:"cooldown_remaining_sec,omitempty"`
-	CooldownReason         string `json:"cooldown_reason,omitempty"`
-	LastError              string `json:"last_error,omitempty"`
-	LastErrorAtUnix        int64  `json:"last_error_at_unix,omitempty"`
-	HasError               bool   `json:"has_error"`
-	TokenPoolTotal         int    `json:"token_pool_total,omitempty"`
-	TokenPoolActive        int    `json:"token_pool_active,omitempty"`
-	TokenPoolCooldown      int    `json:"token_pool_cooldown,omitempty"`
-	TokenPoolInvalid       int    `json:"token_pool_invalid,omitempty"`
-	TokenPoolExpired       int    `json:"token_pool_expired,omitempty"`
-	TokenPoolExpiring      int    `json:"token_pool_expiring,omitempty"`
-	TokenPoolNeedRefresh   int    `json:"token_pool_need_refresh,omitempty"`
-	TokenPoolDisabled      int    `json:"token_pool_disabled,omitempty"`
+	Name                 string `json:"name"`
+	Enabled              bool   `json:"enabled"`
+	Transformer          string `json:"transformer,omitempty"`
+	InCooldown           bool   `json:"in_cooldown"`
+	CooldownRemainingSec int64  `json:"cooldown_remaining_sec,omitempty"`
+	CooldownReason       string `json:"cooldown_reason,omitempty"`
+	LastError            string `json:"last_error,omitempty"`
+	LastErrorAtUnix      int64  `json:"last_error_at_unix,omitempty"`
+	HasError             bool   `json:"has_error"`
+	TokenPoolTotal       int    `json:"token_pool_total,omitempty"`
+	TokenPoolActive      int    `json:"token_pool_active,omitempty"`
+	TokenPoolCooldown    int    `json:"token_pool_cooldown,omitempty"`
+	TokenPoolInvalid     int    `json:"token_pool_invalid,omitempty"`
+	TokenPoolExpired     int    `json:"token_pool_expired,omitempty"`
+	TokenPoolExpiring    int    `json:"token_pool_expiring,omitempty"`
+	TokenPoolNeedRefresh int    `json:"token_pool_need_refresh,omitempty"`
+	TokenPoolDisabled    int    `json:"token_pool_disabled,omitempty"`
 }
 
 // handleHealth handles health check requests with a detailed JSON snapshot
@@ -40,7 +40,7 @@ type healthEndpointStatus struct {
 func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	endpoints := p.config.GetEndpoints()
+	endpoints := p.cfg().GetEndpoints()
 	enabledCount := 0
 	runtimeMap := p.EndpointRuntimeSnapshot()
 	now := time.Now().UTC()
@@ -111,16 +111,18 @@ func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"total_endpoints":   len(endpoints),
 		"endpoints":         statuses,
 		"runtime": map[string]interface{}{
-			"goroutines":      runtime.NumGoroutine(),
-			"go_version":      runtime.Version(),
-			"heap_alloc_mb":   float64(mem.HeapAlloc) / 1024.0 / 1024.0,
-			"heap_sys_mb":     float64(mem.HeapSys) / 1024.0 / 1024.0,
-			"num_gc":          mem.NumGC,
+			"goroutines":    runtime.NumGoroutine(),
+			"go_version":    runtime.Version(),
+			"heap_alloc_mb": float64(mem.HeapAlloc) / 1024.0 / 1024.0,
+			"heap_sys_mb":   float64(mem.HeapSys) / 1024.0 / 1024.0,
+			"num_gc":        mem.NumGC,
 		},
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil && !isClientDisconnectError(err) {
+		logger.Debug("Failed to encode health response: %v", err)
+	}
 }
 
 // maskAPIKey was used by the old verbose /health response that returned full
@@ -130,16 +132,31 @@ func (p *Proxy) handleHealth(w http.ResponseWriter, r *http.Request) {
 // still reads /api/endpoints (which DOES return configs and uses its own
 // masking).
 
-// handleStats handles statistics requests
+// handleStats handles statistics requests.
+//
+// Note: GetStats returns *Stats, whose fields are all unexported, so encoding it
+// directly produced a literal "{}" for every caller. StatsSnapshot builds an
+// explicit serialisable view instead.
 func (p *Proxy) handleStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	stats := p.GetStats()
-	json.NewEncoder(w).Encode(stats)
+	if err := json.NewEncoder(w).Encode(p.StatsSnapshot()); err != nil && !isClientDisconnectError(err) {
+		logger.Debug("Failed to encode stats response: %v", err)
+	}
 }
 
 // GetStats returns current statistics
 func (p *Proxy) GetStats() *Stats {
 	return p.stats
+}
+
+// StatsSnapshot returns a serialisable view of the current statistics, suitable
+// for JSON encoding by /stats and by the web UI's SSE feed.
+func (p *Proxy) StatsSnapshot() StatsSnapshot {
+	total, endpoints := p.stats.GetStats()
+	if endpoints == nil {
+		endpoints = make(map[string]*EndpointStats)
+	}
+	return StatsSnapshot{TotalRequests: total, Endpoints: endpoints}
 }
 
 // handleCountTokens handles token counting requests
@@ -207,7 +224,9 @@ func (p *Proxy) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil && !isClientDisconnectError(err) {
+		logger.Debug("Failed to encode count_tokens response: %v", err)
+	}
 }
 
 // UpdateConfig updates the proxy configuration
@@ -217,14 +236,14 @@ func (p *Proxy) UpdateConfig(cfg *config.Config) error {
 
 	// Save current endpoint name
 	var currentEndpointName string
-	if p.config != nil {
+	if p.cfg() != nil {
 		endpoints := p.getEnabledEndpoints()
 		if len(endpoints) > 0 && p.currentIndex < len(endpoints) {
 			currentEndpointName = endpoints[p.currentIndex].Name
 		}
 	}
 
-	p.config = cfg
+	p.config.Store(cfg)
 
 	// Try to find the previous current endpoint in new config
 	newEndpoints := p.getEnabledEndpoints()

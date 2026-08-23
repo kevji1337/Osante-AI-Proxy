@@ -17,6 +17,10 @@ func (p *Proxy) handleNonStreamingResponse(w http.ResponseWriter, resp *http.Res
 	var bodyBytes []byte
 	var err error
 
+	// Close on every path: the early returns below used to leak the body, which
+	// pins the connection instead of returning it to the idle pool.
+	defer func() { _ = resp.Body.Close() }()
+
 	if resp.Header.Get("Content-Encoding") == "gzip" {
 		bodyBytes, err = decompressGzip(resp.Body)
 		if err != nil {
@@ -30,9 +34,10 @@ func (p *Proxy) handleNonStreamingResponse(w http.ResponseWriter, resp *http.Res
 			return 0, 0, err
 		}
 	}
-	resp.Body.Close()
 
-	logger.DebugLog("[%s] Response Body: %s", endpoint.Name, string(bodyBytes))
+	if logger.DebugEnabled() {
+		logger.DebugLog("[%s] Response Body: %s", endpoint.Name, string(bodyBytes))
+	}
 
 	// Transform response back to Claude format
 	transformedResp, err := trans.TransformResponse(bodyBytes, false)
@@ -41,9 +46,11 @@ func (p *Proxy) handleNonStreamingResponse(w http.ResponseWriter, resp *http.Res
 		return 0, 0, err
 	}
 
-	logger.DebugLog("[%s] Transformed Response: %s", endpoint.Name, string(transformedResp))
+	if logger.DebugEnabled() {
+		logger.DebugLog("[%s] Transformed Response: %s", endpoint.Name, string(transformedResp))
+	}
 
-	// If the transformer returned a synthesised SSE body (e.g. the GitLab
+	// If the transformer returned a synthesized SSE body (e.g. the GitLab
 	// Duo transformer turning a JSON answer into an Anthropic stream),
 	// override the upstream's Content-Type so the client parses it as SSE.
 	transformedIsSSE := looksLikeSSEBody(transformedResp)
@@ -78,13 +85,15 @@ func (p *Proxy) handleNonStreamingResponse(w http.ResponseWriter, resp *http.Res
 	}
 
 	w.WriteHeader(resp.StatusCode)
-	w.Write(transformedResp)
+	if _, writeErr := w.Write(transformedResp); writeErr != nil && !isClientDisconnectError(writeErr) {
+		logger.Error("[%s] Failed to write response body: %v", endpoint.Name, writeErr)
+	}
 
 	return inputTokens, outputTokens, nil
 }
 
 // looksLikeSSEBody reports whether body looks like an SSE stream (i.e. starts
-// with an `event:` or `data:` line). Used to detect transformer-synthesised
+// with an `event:` or `data:` line). Used to detect transformer-synthesized
 // streams so we can flip the Content-Type before flushing to the client.
 func looksLikeSSEBody(body []byte) bool {
 	trimmed := strings.TrimLeft(string(body), " \t\r\n")
