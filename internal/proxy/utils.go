@@ -26,7 +26,7 @@ func shouldRetry(statusCode int) bool {
 
 // isClientDisconnectError reports whether a write/read error against the
 // client connection is a normal client-side disconnect rather than something
-// the server did wrong. Without this the proxy logs ERROR for every cancelled
+// the server did wrong. Without this the proxy logs ERROR for every canceled
 // request — especially noisy on Windows where the OS surfaces resets as
 // "wsasend: An existing connection was forcibly closed by the remote host"
 // instead of the POSIX-style "broken pipe" / "connection reset".
@@ -63,10 +63,7 @@ func isGatewayNotFoundNoise(body string) bool {
 		return true
 	}
 	lower := strings.ToLower(trimmed)
-	if strings.Contains(lower, "invalid url (get /") {
-		return true
-	}
-	return false
+	return strings.Contains(lower, "invalid url (get /")
 }
 
 // cleanIncompleteToolCalls removes incomplete tool_use blocks from request

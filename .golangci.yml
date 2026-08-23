@@ -1,36 +1,52 @@
-# Baseline golangci-lint config.
-# Conservative: enable defaults + a handful of pragmatic linters that have
-# been useful for this code base. Tighten over time.
+# golangci-lint configuration (v2 schema).
+#
+# Migrated from the v1 layout: `linters.disable-all` -> `linters.default`,
+# `linters-settings` -> `linters.settings`, `issues.exclude-rules` ->
+# `linters.exclusions.rules`, and gofmt moved to the new `formatters` section.
+# The v9 GitHub action only accepts golangci-lint v2, so the schema bump and the
+# action bump go together.
+version: "2"
 
 run:
-  timeout: 5m
   tests: true
 
 linters:
-  disable-all: true
+  default: none
   enable:
-    - errcheck      # missing error checks
-    - govet         # standard go vet checks
-    - ineffassign   # unused assignments
-    - staticcheck   # generic staticcheck (subsumes many older linters)
-    - unused        # unused symbols
-    - gofmt         # formatting
-    - misspell      # spelling
-    - bodyclose     # http.Response.Body must be closed
-    - nolintlint    # malformed //nolint directives
+    - bodyclose # http.Response.Body must be closed
+    - errcheck # missing error checks
+    - govet # standard go vet checks
+    - ineffassign # unused assignments
+    - misspell # spelling
+    - nolintlint # malformed //nolint directives
+    - staticcheck # subsumes many older linters
+    - unused # unused symbols
+    # Next pass, one at a time (each currently has a backlog):
+    #   errorlint  - %w / errors.Is / errors.As misuse (6 findings)
+    #   nilerr     - returning nil after a non-nil error (13 findings)
+    #   unconvert  - redundant type conversions
+    #   noctx      - flags every http.NewRequest without a context; this code
+    #                attaches the context later via req.WithContext, so it is
+    #                mostly false positives here (67 findings)
 
-linters-settings:
-  misspell:
-    locale: US
+  settings:
+    misspell:
+      locale: US
+
+  exclusions:
+    # Don't bury problems in generated-file heuristics; this repo has none.
+    generated: strict
+    rules:
+      # Tests: `_ = w.Write(...)` and unclosed recorder bodies are idiomatic there.
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
 
 issues:
-  # Don't bury problems in less-than-helpful exclusions; let the team decide.
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
-  # Generated/test files: relax errcheck — _ = fmt.Println patterns are common.
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-        - bodyclose

@@ -257,4 +257,3 @@ type OneMinAIReqCheck struct {
 		WebSearch bool   `json:"webSearch"`
 	} `json:"promptObject"`
 }
-

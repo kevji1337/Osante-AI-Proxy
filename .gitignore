@@ -42,5 +42,7 @@ node_modules/
 /cmd/server/osante/
 /cmd/server/build/
 IMPROVEMENTS.md
-CLAUDE.md
+
+# Compiled server binary (the .exe form is covered by *.exe above)
+/cmd/server/osante-proxy
 

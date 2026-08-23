@@ -151,7 +151,7 @@ func GeminiStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 			var result strings.Builder
 			writeEvent := func(evt map[string]interface{}) {
 				d, _ := json.Marshal(evt)
-				result.WriteString(fmt.Sprintf("data: %s\n\n", d))
+				_, _ = fmt.Fprintf(&result, "data: %s\n\n", d)
 			}
 			if ctx.ContentBlockStarted {
 				writeEvent(map[string]interface{}{"type": "response.output_text.done", "output_index": 0, "content_index": 0})
@@ -198,7 +198,7 @@ func GeminiStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 	var result strings.Builder
 	writeEvent := func(evt map[string]interface{}) {
 		d, _ := json.Marshal(evt)
-		result.WriteString(fmt.Sprintf("data: %s\n\n", d))
+		_, _ = fmt.Fprintf(&result, "data: %s\n\n", d)
 	}
 
 	// Send response.created on first chunk
@@ -312,7 +312,7 @@ func OpenAI2StreamToGemini(event []byte, ctx *transformer.StreamContext) ([]byte
 		if evt.Item != nil && evt.Item.Type == "function_call" && ctx.ToolBlockStarted {
 			ctx.ToolBlockStarted = false
 			var args map[string]interface{}
-			json.Unmarshal([]byte(ctx.ToolArguments), &args)
+			_ = json.Unmarshal([]byte(ctx.ToolArguments), &args)
 			chunk := map[string]interface{}{
 				"candidates": []map[string]interface{}{
 					{"content": map[string]interface{}{"role": "model", "parts": []map[string]interface{}{

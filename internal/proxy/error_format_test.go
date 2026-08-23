@@ -101,7 +101,7 @@ func TestWriteLastUpstreamError_HTMLBody(t *testing.T) {
 	}
 
 	var payload struct {
-		Type  string `json:"type"`
+		Type  string                         `json:"type"`
 		Error struct{ Type, Message string } `json:"error"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
@@ -144,9 +144,9 @@ func TestWriteLastUpstreamError_JSONBody(t *testing.T) {
 // and crash with AssertionError + a blank "Error:" field.
 func TestExtractUpstreamErrorMessage(t *testing.T) {
 	cases := []struct {
-		name        string
-		body        string
-		wantMsg     string
+		name            string
+		body            string
+		wantMsg         string
 		wantIsAnthropic bool
 	}{
 		{
@@ -180,8 +180,8 @@ func TestExtractUpstreamErrorMessage(t *testing.T) {
 			wantIsAnthropic: false,
 		},
 		{
-			name:            "cloudflare-style with title",
-			body:            `{"type":"https://developers.cloudflare.com/...","title":"Error 502: Bad gateway","status":502,"detail":"the origin..."}`,
+			name: "cloudflare-style with title",
+			body: `{"type":"https://developers.cloudflare.com/...","title":"Error 502: Bad gateway","status":502,"detail":"the origin..."}`,
 			// `type` is non-"error" string, so we fall through; `detail` wins
 			// over `title` in our lookup order.
 			wantMsg:         "the origin...",
@@ -216,8 +216,8 @@ func TestExtractUpstreamErrorMessage(t *testing.T) {
 
 // TestWriteLastUpstreamError_FreemodelJSON — the exact regression that
 // re-broke Hermes today. Freemodel returns `{"error":"Usage limit
-// reached..."}` with status 402. Old behaviour: forward as-is, Hermes
-// can't find error.message, AssertionError. New behaviour: rewrap into
+// reached..."}` with status 402. Old behavior: forward as-is, Hermes
+// can't find error.message, AssertionError. New behavior: rewrap into
 // Anthropic envelope with the message preserved.
 func TestWriteLastUpstreamError_FreemodelJSON(t *testing.T) {
 	body := []byte(`{"error":"Usage limit reached, will reset on today at 10:32 PM (UTC+8)"}`)

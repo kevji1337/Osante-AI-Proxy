@@ -37,7 +37,7 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		logger.Error("[%s] ResponseWriter does not support flushing", endpoint.Name)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return 0, 0, ""
 	}
 
@@ -47,10 +47,10 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 		gzipReader, err := gzip.NewReader(resp.Body)
 		if err != nil {
 			logger.Error("[%s] Failed to create gzip reader: %v", endpoint.Name, err)
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return 0, 0, ""
 		}
-		defer gzipReader.Close()
+		defer func() { _ = gzipReader.Close() }()
 		reader = gzipReader
 	}
 
@@ -78,9 +78,11 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 	var buffer bytes.Buffer
 	var outputText strings.Builder
 	eventCount := 0
-	streamDone := false
 
-	for scanner.Scan() && !streamDone {
+	// The loop exits via break on "data: [DONE]" and on a client write error;
+	// the old streamDone flag was assigned right before each of those breaks and
+	// never actually read.
+	for scanner.Scan() {
 		line := scanner.Text()
 
 		// Once we've started streaming a 200 OK response back to the client we
@@ -90,7 +92,6 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 		// is no benefit to truncating an already-in-flight upstream stream.
 
 		if strings.Contains(line, "data: [DONE]") {
-			streamDone = true
 
 			// Token Usage Fallback: Inject message_delta with estimated output_tokens before [DONE]
 			if outputTokens == 0 && outputText.Len() > 0 {
@@ -111,12 +112,16 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 
 			buffer.WriteString(line + "\n")
 			eventData := buffer.Bytes()
-			logger.DebugLog("[%s] SSE Event #%d (Original): %s", endpoint.Name, eventCount+1, string(eventData))
+			if logger.DebugEnabled() {
+				logger.DebugLog("[%s] SSE Event #%d (Original): %s", endpoint.Name, eventCount+1, string(eventData))
+			}
 
 			transformedEvent, err := p.transformStreamEvent(eventData, trans, transformerName, streamCtx)
 			if err == nil && len(transformedEvent) > 0 {
-				logger.DebugLog("[%s] SSE Event #%d (Transformed): %s", endpoint.Name, eventCount+1, string(transformedEvent))
-				w.Write(transformedEvent)
+				if logger.DebugEnabled() {
+					logger.DebugLog("[%s] SSE Event #%d (Transformed): %s", endpoint.Name, eventCount+1, string(transformedEvent))
+				}
+				_, _ = w.Write(transformedEvent)
 				flusher.Flush()
 			}
 			break
@@ -127,7 +132,9 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 		if line == "" {
 			eventCount++
 			eventData := buffer.Bytes()
-			logger.DebugLog("[%s] SSE Event #%d (Original): %s", endpoint.Name, eventCount, string(eventData))
+			if logger.DebugEnabled() {
+				logger.DebugLog("[%s] SSE Event #%d (Original): %s", endpoint.Name, eventCount, string(eventData))
+			}
 
 			p.captureCodexRateLimitsFromEvent(endpoint, credentialID, eventData)
 
@@ -157,7 +164,9 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 			if err != nil {
 				logger.Error("[%s] Failed to transform SSE event: %v", endpoint.Name, err)
 			} else if len(transformedEvent) > 0 {
-				logger.DebugLog("[%s] SSE Event #%d (Transformed): %s", endpoint.Name, eventCount, string(transformedEvent))
+				if logger.DebugEnabled() {
+					logger.DebugLog("[%s] SSE Event #%d (Transformed): %s", endpoint.Name, eventCount, string(transformedEvent))
+				}
 
 				p.extractTokensFromEvent(transformedEvent, &inputTokens, &outputTokens)
 				p.extractTextFromEvent(transformedEvent, &outputText)
@@ -168,7 +177,6 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 					} else {
 						logger.Error("[%s] Failed to write transformed event: %v", endpoint.Name, writeErr)
 					}
-					streamDone = true
 					break
 				}
 				flusher.Flush()
@@ -198,7 +206,7 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, resp *http.Respon
 		}
 	}
 
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return inputTokens, outputTokens, outputText.String()
 }
 
@@ -209,13 +217,13 @@ func (p *Proxy) handleStreamingAsNonStreaming(w http.ResponseWriter, resp *http.
 	if resp.Header.Get("Content-Encoding") == "gzip" {
 		gzipReader, err := gzip.NewReader(resp.Body)
 		if err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return 0, 0, "", err
 		}
-		defer gzipReader.Close()
+		defer func() { _ = gzipReader.Close() }()
 		reader = gzipReader
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	scanner := bufio.NewScanner(reader)
 	buf := make([]byte, 0, 128*1024)
@@ -281,7 +289,7 @@ func (p *Proxy) handleStreamingAsNonStreaming(w http.ResponseWriter, resp *http.
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
-	w.Write(transformedResp)
+	_, _ = w.Write(transformedResp)
 
 	inputTokens, outputTokens := extractTokenUsage(transformedResp)
 	transformedInputTokens, transformedOutputTokens := inputTokens, outputTokens
@@ -356,13 +364,14 @@ func (p *Proxy) extractTokensFromEvent(eventData []byte, inputTokens, outputToke
 
 		// Claude-style events
 		eventType, _ := event["type"].(string)
-		if eventType == "message_start" {
+		switch eventType {
+		case "message_start":
 			if message, ok := event["message"].(map[string]interface{}); ok {
 				if usage, ok := message["usage"].(map[string]interface{}); ok {
 					applyUsage(usage)
 				}
 			}
-		} else if eventType == "message_delta" {
+		case "message_delta":
 			if usage, ok := event["usage"].(map[string]interface{}); ok {
 				applyUsage(usage)
 			}
@@ -476,6 +485,6 @@ func decompressGzip(body io.ReadCloser) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer gzipReader.Close()
+	defer func() { _ = gzipReader.Close() }()
 	return io.ReadAll(gzipReader)
 }

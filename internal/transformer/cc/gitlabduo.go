@@ -10,7 +10,7 @@ package cc
 //   Response: GitLab returns the answer as a JSON-encoded string
 //             (e.g. "To define class in ruby...").
 //             We wrap it in either a non-streaming Anthropic message or a
-//             synthesised Anthropic SSE stream, depending on whether the
+//             synthesized Anthropic SSE stream, depending on whether the
 //             original Claude Code request had stream=true.
 //
 // GitLab's REST endpoint is NOT an SSE endpoint (streaming is only available
@@ -36,7 +36,7 @@ type GitLabDuoTransformer struct {
 	stream bool
 
 	// originalModel is the model the client asked for (used to echo it back
-	// in the synthesised Anthropic response).
+	// in the synthesized Anthropic response).
 	originalModel string
 }
 
@@ -94,7 +94,7 @@ func (t *GitLabDuoTransformer) TransformRequest(req []byte) ([]byte, error) {
 	// with one. The public REST docs don't describe a `model` field, but
 	// GitLab's UI clearly switches between Anthropic / Vertex / Bedrock
 	// variants, so we ship it through and let GitLab decide. If the field
-	// is ignored, behaviour is identical to before.
+	// is ignored, behavior is identical to before.
 	if model := strings.TrimSpace(t.effectiveOutgoingModel()); model != "" {
 		out["model"] = model
 	}
@@ -127,7 +127,7 @@ func (t *GitLabDuoTransformer) effectiveOutgoingModel() string {
 // shown in the chat UI / our Fetch Models dropdown) into the snake_case
 // `gitlab_identifier` GitLab's REST endpoint expects.
 //
-// Recognised input shapes:
+// Recognized input shapes:
 //
 //	"Claude Opus 4.7 - Anthropic"   -> "claude_opus_4_7"
 //	"Claude Opus 4.7 - Vertex"      -> "claude_opus_4_7_vertex"

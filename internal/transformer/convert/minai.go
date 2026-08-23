@@ -13,9 +13,9 @@ import (
 
 // OneMinAIRequest represents a request to 1min.AI /api/features endpoint.
 type OneMinAIRequest struct {
-	Type         string                `json:"type"`
-	Model        string                `json:"model"`
-	PromptObject OneMinAIPromptObject  `json:"promptObject"`
+	Type         string               `json:"type"`
+	Model        string               `json:"model"`
+	PromptObject OneMinAIPromptObject `json:"promptObject"`
 }
 
 // OneMinAIPromptObject holds prompt content and settings for 1min.AI.
@@ -26,11 +26,11 @@ type OneMinAIPromptObject struct {
 
 // OneMinAIResponse represents the top-level 1min.AI API response.
 type OneMinAIResponse struct {
-	AiRecord *OneMinAIAiRecord      `json:"aiRecord,omitempty"`
-	Status   string                 `json:"status,omitempty"`
-	Error    interface{}            `json:"error,omitempty"`
-	Message  string                 `json:"message,omitempty"`
-	Code     interface{}            `json:"code,omitempty"`
+	AiRecord *OneMinAIAiRecord `json:"aiRecord,omitempty"`
+	Status   string            `json:"status,omitempty"`
+	Error    interface{}       `json:"error,omitempty"`
+	Message  string            `json:"message,omitempty"`
+	Code     interface{}       `json:"code,omitempty"`
 }
 
 // OneMinAIAiRecord contains the AI execution result details.
@@ -540,7 +540,7 @@ func OneMinAIRespToClaudeSSE(respBytes []byte, model string) ([]byte, error) {
 
 	writeEvent := func(event string, payload map[string]interface{}) {
 		raw, _ := json.Marshal(payload)
-		fmt.Fprintf(&sb, "event: %s\ndata: %s\n\n", event, raw)
+		_, _ = fmt.Fprintf(&sb, "event: %s\ndata: %s\n\n", event, raw)
 	}
 
 	writeEvent("message_start", map[string]interface{}{
@@ -669,7 +669,7 @@ func OneMinAIRespToOpenAISSE(respBytes []byte, model string) ([]byte, error) {
 		},
 	}
 	d1, _ := json.Marshal(chunk1)
-	fmt.Fprintf(&sb, "data: %s\n\n", d1)
+	_, _ = fmt.Fprintf(&sb, "data: %s\n\n", d1)
 
 	// Chunk 2..N: Content deltas
 	for _, chunk := range splitChunksRunes(answer, 24) {
@@ -689,7 +689,7 @@ func OneMinAIRespToOpenAISSE(respBytes []byte, model string) ([]byte, error) {
 			},
 		}
 		dc, _ := json.Marshal(chunkEvent)
-		fmt.Fprintf(&sb, "data: %s\n\n", dc)
+		_, _ = fmt.Fprintf(&sb, "data: %s\n\n", dc)
 	}
 
 	// Final Chunk: finish_reason & usage
@@ -713,7 +713,7 @@ func OneMinAIRespToOpenAISSE(respBytes []byte, model string) ([]byte, error) {
 		},
 	}
 	df, _ := json.Marshal(finalChunk)
-	fmt.Fprintf(&sb, "data: %s\n\n", df)
+	_, _ = fmt.Fprintf(&sb, "data: %s\n\n", df)
 	sb.WriteString("data: [DONE]\n\n")
 
 	return []byte(sb.String()), nil
@@ -774,7 +774,7 @@ func OneMinAIRespToOpenAI2SSE(respBytes []byte, model string) ([]byte, error) {
 	var sb strings.Builder
 	writeEvent := func(payload map[string]interface{}) {
 		raw, _ := json.Marshal(payload)
-		fmt.Fprintf(&sb, "data: %s\n\n", raw)
+		_, _ = fmt.Fprintf(&sb, "data: %s\n\n", raw)
 	}
 
 	// 1. response.created
@@ -963,9 +963,7 @@ func cleanOneMinAIModelName(model string, fallback string) string {
 	if m == "" {
 		m = strings.TrimSpace(fallback)
 	}
-	if strings.HasPrefix(m, "@") {
-		m = strings.TrimPrefix(m, "@")
-	}
+	m = strings.TrimPrefix(m, "@")
 	if idx := strings.LastIndex(m, "/"); idx != -1 {
 		m = strings.TrimSpace(m[idx+1:])
 	}

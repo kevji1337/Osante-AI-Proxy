@@ -155,7 +155,7 @@ func TestOpenAIStreamToClaudeWithThinking(t *testing.T) {
 
 	assertContains(t, fullEvents, "\"type\":\"thinking\"", "Expected thinking block start, but not found")
 	if !strings.Contains(fullEvents, "\"thinking\":\"Thinking...\"") {
-		if !(strings.Contains(fullEvents, "\"thinking\":\"Thinking\"") && strings.Contains(fullEvents, "\"thinking\":\"...\"")) {
+		if !strings.Contains(fullEvents, "\"thinking\":\"Thinking\"") || !strings.Contains(fullEvents, "\"thinking\":\"...\"") {
 			t.Errorf("Expected thinking delta chunks, but not found")
 		}
 	}

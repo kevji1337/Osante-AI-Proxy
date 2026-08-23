@@ -49,7 +49,7 @@ func OpenAIReqToGemini(openaiReq []byte, model string) ([]byte, error) {
 				toolCallIDToName[tc.ID] = tc.Function.Name
 			}
 			var args map[string]interface{}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
 			parts = append(parts, map[string]interface{}{
 				"functionCall": map[string]interface{}{"name": tc.Function.Name, "args": args},
 			})

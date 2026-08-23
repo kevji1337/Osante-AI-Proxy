@@ -279,7 +279,7 @@ func OpenAI2RespToClaude(openai2Resp []byte) ([]byte, error) {
 			}
 		case "function_call":
 			var args map[string]interface{}
-			json.Unmarshal([]byte(item.Arguments), &args)
+			_ = json.Unmarshal([]byte(item.Arguments), &args)
 			toolID := item.CallID
 			if toolID == "" {
 				toolID = item.ID
@@ -333,7 +333,7 @@ func ClaudeStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 	var result strings.Builder
 	writeEvent := func(evt map[string]interface{}) {
 		d, _ := json.Marshal(evt)
-		result.WriteString(fmt.Sprintf("data: %s\n\n", d))
+		_, _ = fmt.Fprintf(&result, "data: %s\n\n", d)
 	}
 
 	switch eventType {

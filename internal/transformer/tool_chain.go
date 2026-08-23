@@ -125,7 +125,7 @@ func (h *ToolChainHandler) ExecuteChain() (io.Reader, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("recursive API call failed with status %d: %s", resp.StatusCode, string(body))
 	}
 

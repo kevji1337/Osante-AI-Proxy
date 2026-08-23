@@ -14,12 +14,23 @@ jobs:
     name: test & vet
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      # go-version-file keeps the toolchain pinned to go.mod (currently 1.27) so
+      # CI cannot silently drift behind the module requirement again.
+      - uses: actions/setup-go@v7
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
           cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
 
       - name: go vet
         run: go vet ./...
@@ -30,17 +41,44 @@ jobs:
       - name: go test
         run: go test ./... -count=1
 
+      # The race detector is the only thing that catches the config-pointer and
+      # logger races this code base has had; it cannot run on the maintainer's
+      # windows/386 toolchain, so CI is the only place it happens.
+      - name: go test -race
+        run: go test -race ./... -count=1
+
+      - name: coverage
+        run: go test ./... -count=1 -coverprofile=coverage.out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage.out
+
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
           cache: true
 
-      - uses: golangci/golangci-lint-action@v6
+      # v9 is the first release running on Node 24 (v7/v8 are still Node 20 and
+      # trigger the deprecation warning). v7+ requires a golangci-lint v2 config.
+      - uses: golangci/golangci-lint-action@v9
         with:
-          version: v1.64
+          version: v2.13.1

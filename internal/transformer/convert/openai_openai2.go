@@ -363,7 +363,7 @@ func OpenAIStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 			var result strings.Builder
 			writeEvent := func(evt map[string]interface{}) {
 				d, _ := json.Marshal(evt)
-				result.WriteString(fmt.Sprintf("data: %s\n\n", d))
+				fmt.Fprintf(&result, "data: %s\n\n", d)
 			}
 			if ctx.ContentBlockStarted {
 				writeEvent(map[string]interface{}{"type": "response.output_text.done", "output_index": 0, "content_index": 0})
@@ -402,7 +402,7 @@ func OpenAIStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 	var result strings.Builder
 	writeEvent := func(evt map[string]interface{}) {
 		d, _ := json.Marshal(evt)
-		result.WriteString(fmt.Sprintf("data: %s\n\n", d))
+		fmt.Fprintf(&result, "data: %s\n\n", d)
 	}
 
 	if !ctx.MessageStartSent {
