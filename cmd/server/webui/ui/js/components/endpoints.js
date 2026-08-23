@@ -889,12 +889,20 @@ class Endpoints {
         }
 
         try {
+            // The server reports what happened to the api key that came with the
+            // request: it is stored as a token-pool entry, not on the endpoint row.
+            let result;
             if (isEdit) {
-                await api.updateEndpoint(originalName, data);
+                result = await api.updateEndpoint(originalName, data);
                 notifications.success(t('notifications.endpointUpdated'));
             } else {
-                await api.createEndpoint(data);
+                result = await api.createEndpoint(data);
                 notifications.success(t('notifications.endpointCreated'));
+            }
+            if (result && result.tokenError) {
+                notifications.error(t('notifications.tokenNotStored') + result.tokenError);
+            } else if (result && result.tokenAdded) {
+                notifications.success(t('notifications.tokenAddedToPool'));
             }
 
             this.closeModal();

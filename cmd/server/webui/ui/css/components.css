@@ -537,3 +537,90 @@
     from { opacity: 0; transform: scale(0.96); }
     to { opacity: 1; transform: scale(1); }
 }
+
+/* ---------------- Toasts ----------------
+   notifications.js builds .toast nodes and appends them to #toast-container
+   (index.html). Neither had any styling, so every toast rendered unpositioned
+   at the bottom of the document — below #app's 100vh — and was removed again
+   after 3s, which is why notifications appeared to have vanished entirely. */
+#toast-container {
+    position: fixed;
+    top: 1.25rem;
+    right: 1.25rem;
+    z-index: 2000;
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    width: min(380px, calc(100vw - 2.5rem));
+    /* The container spans a fixed column; only the toasts themselves should
+       swallow clicks, so the page stays interactive around them. */
+    pointer-events: none;
+}
+
+.toast {
+    --toast-accent: var(--info);
+    display: flex;
+    align-items: flex-start;
+    gap: 0.7rem;
+    padding: 0.85rem 0.9rem;
+    background-color: var(--bg-elevated);
+    border: 1px solid var(--border-strong);
+    border-left: 3px solid var(--toast-accent);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    line-height: 1.45;
+    pointer-events: auto;
+    animation: slideInRight 0.28s ease-out;
+}
+
+.toast.success { --toast-accent: var(--accent); }
+.toast.error   { --toast-accent: var(--danger); }
+.toast.warning { --toast-accent: var(--warning); }
+.toast.info    { --toast-accent: var(--info); }
+
+.toast-icon {
+    flex: 0 0 auto;
+    width: 1.25rem;
+    text-align: center;
+    font-size: 0.95rem;
+    line-height: 1.45;
+    color: var(--toast-accent);
+}
+
+.toast-content {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.toast-message {
+    /* Upstream error strings can be long and unbroken (URLs, JSON) — wrap them
+       instead of letting the toast blow past its column. */
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+
+.toast-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    font-size: 1.15rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0.1rem 0.25rem;
+    border-radius: var(--radius-sm);
+    transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.toast-close:hover {
+    color: var(--text-primary);
+    background-color: var(--bg-tertiary);
+}
+
+/* Referenced by NotificationManager.remove(), which replays it in reverse. */
+@keyframes slideInRight {
+    from { opacity: 0; transform: translateX(24px); }
+    to   { opacity: 1; transform: translateX(0); }
+}
