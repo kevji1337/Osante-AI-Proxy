@@ -48,7 +48,7 @@ import (
 	"strings"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 
 	"github.com/google/uuid"
 	"github.com/kevji1337/Osante-AI-Proxy/internal/config"
@@ -83,7 +83,7 @@ func (p *Proxy) handleGitLabDuoRequest(
 	}
 
 	// Context is bound to BOTH the client's request and a 180 s upper bound.
-	// When Claude Code aborts (Esc/Ctrl+C) r.Context() is cancelled and we tear
+	// When Claude Code aborts (Esc/Ctrl+C) r.Context() is canceled and we tear
 	// down the workflow instead of burning a Duo credit for nothing.
 	ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
 	defer cancel()
@@ -105,13 +105,17 @@ func (p *Proxy) handleGitLabDuoRequest(
 			p.writeDuoSSEResponse(w, modelIdentifier, infl.result.answer)
 			return
 		case <-ctx.Done():
-			writeProxyError(w, http.StatusRequestTimeout, "client_cancelled",
-				"client cancelled while waiting for in-flight request")
+			writeProxyError(w, http.StatusRequestTimeout, "client_canceled",
+				"client canceled while waiting for in-flight request")
 			return
 		}
 	}
 	// We are the leader — make sure waiters are released even on panic.
-	publishedResult := duoInflightResult{}
+	//
+	// Seeded with an error rather than the zero value: a zero duoInflightResult
+	// is an empty *successful* answer, so any early return that forgot to set
+	// publishedResult would hand every waiter a blank reply with no error.
+	publishedResult := duoInflightResult{err: errDuoLeaderAbandoned}
 	defer func() {
 		globalDuoInflight.publish(dedupKey, infl, publishedResult)
 	}()
@@ -133,8 +137,8 @@ func (p *Proxy) handleGitLabDuoRequest(
 			return
 		}
 		if ctx.Err() != nil {
-			// Client cancelled or timed out — don't log as ERROR.
-			logger.Info("[%s] GitLab Duo: request cancelled: %v", endpoint.Name, ctx.Err())
+			// Client canceled or timed out — don't log as ERROR.
+			logger.Info("[%s] GitLab Duo: request canceled: %v", endpoint.Name, ctx.Err())
 			return
 		}
 		logger.Error("[%s] GitLab Duo: %v", endpoint.Name, err)
@@ -311,12 +315,12 @@ func gitlabWSChat(
 	if err != nil {
 		if httpResp != nil {
 			body, _ := io.ReadAll(httpResp.Body)
-			httpResp.Body.Close()
+			_ = httpResp.Body.Close()
 			return "", fmt.Errorf("ws dial HTTP %d: %s — %w", httpResp.StatusCode, truncate(string(body), 400), err)
 		}
 		return "", fmt.Errorf("ws dial: %w", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 	conn.SetReadLimit(8 << 20) // 8 MiB
 
 	gitlabModel2 := toGitLabIdentifier(modelID)
@@ -409,12 +413,12 @@ func gitlabWSChat(
 			}
 		}
 		switch cp.Status {
-		case "INPUT_REQUIRED", "FINISHED", "COMPLETED", "FAILED", "CANCELLED":
+		case "INPUT_REQUIRED", "FINISHED", "COMPLETED", "FAILED", "CANCELED":
 			goto done
 		}
 	}
 done:
-	conn.Close(websocket.StatusNormalClosure, "")
+	_ = conn.Close(websocket.StatusNormalClosure, "")
 	if answer == "" {
 		return "", fmt.Errorf("no answer received from GitLab Duo WebSocket")
 	}
@@ -529,7 +533,7 @@ func gitlabPost(ctx context.Context, url, token string, body map[string]any) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
@@ -554,7 +558,7 @@ func streamAnthropicSSE(w http.ResponseWriter, model, answer string) {
 
 	writeEvent := func(event string, payload map[string]any) {
 		raw, _ := json.Marshal(payload)
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, raw)
+		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, raw)
 	}
 
 	msgID := "msg_" + strings.ReplaceAll(uuid.NewString(), "-", "")

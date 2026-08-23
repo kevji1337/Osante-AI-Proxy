@@ -12,8 +12,14 @@ package proxy
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"sync"
 )
+
+// errDuoLeaderAbandoned is what waiters receive if the leader goroutine returns
+// without publishing a real outcome. It should never surface in practice; it
+// exists so the failure mode is a visible error instead of a silent empty answer.
+var errDuoLeaderAbandoned = errors.New("in-flight GitLab Duo request ended without a result")
 
 // duoInflightResult is the shared outcome of an in-flight Duo request.
 type duoInflightResult struct {
