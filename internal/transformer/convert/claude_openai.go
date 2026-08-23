@@ -217,7 +217,7 @@ func OpenAIReqToClaude(openaiReq []byte, model string) ([]byte, error) {
 			}
 			for _, tc := range msg.ToolCalls {
 				var args map[string]interface{}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
 				blocks = append(blocks, map[string]interface{}{
 					"type":  "tool_use",
 					"id":    tc.ID,
@@ -340,7 +340,7 @@ func OpenAIRespToClaude(openaiResp []byte) ([]byte, error) {
 		}
 		for _, tc := range choice.Message.ToolCalls {
 			var args map[string]interface{}
-			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
 			content = append(content, map[string]interface{}{
 				"type":  "tool_use",
 				"id":    tc.ID,
@@ -638,40 +638,6 @@ func OpenAIStreamToClaude(event []byte, ctx *transformer.StreamContext) ([]byte,
 }
 
 // Helper functions
-
-func convertClaudeContentToOpenAI(content []interface{}) (interface{}, []transformer.OpenAIToolCall) {
-	var textParts []string
-	var toolCalls []transformer.OpenAIToolCall
-
-	for _, block := range content {
-		m, ok := block.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		switch m["type"] {
-		case "text":
-			textParts = append(textParts, m["text"].(string))
-		case "thinking":
-			// Skip thinking blocks
-			continue
-		case "tool_use":
-			args, _ := json.Marshal(m["input"])
-			toolCalls = append(toolCalls, transformer.OpenAIToolCall{
-				ID:   m["id"].(string),
-				Type: "function",
-				Function: struct {
-					Name      string `json:"name"`
-					Arguments string `json:"arguments"`
-				}{Name: m["name"].(string), Arguments: string(args)},
-			})
-		}
-	}
-
-	if len(textParts) > 0 {
-		return strings.Join(textParts, ""), toolCalls
-	}
-	return "", toolCalls
-}
 
 func convertOpenAIContentToClaude(content []interface{}) []map[string]interface{} {
 	var result []map[string]interface{}
