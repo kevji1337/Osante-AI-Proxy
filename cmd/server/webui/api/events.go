@@ -20,7 +20,8 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// No Access-Control-Allow-Origin: this is an unauthenticated admin feed on
+	// loopback, and "*" let any site the user visited subscribe to it.
 
 	// Create a flusher
 	flusher, ok := w.(http.Flusher)
@@ -30,7 +31,7 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send initial connection message
-	fmt.Fprintf(w, "data: {\"type\":\"connected\",\"message\":\"Connected to Osante Proxy events\"}\n\n")
+	_, _ = fmt.Fprintf(w, "data: {\"type\":\"connected\",\"message\":\"Connected to Osante Proxy events\"}\n\n")
 	flusher.Flush()
 
 	// Create ticker for periodic updates
@@ -50,19 +51,12 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-ticker.C:
 			// Send stats update
-			stats := h.proxy.GetStats()
+			stats := h.proxy.StatsSnapshot()
 
-			// Get current endpoint
-			endpoints := h.config.GetEndpoints()
-			var currentEndpoint string
-			if len(endpoints) > 0 {
-				for _, ep := range endpoints {
-					if ep.Enabled {
-						currentEndpoint = ep.Name
-						break
-					}
-				}
-			}
+			// The real rotation index, not "first enabled" — listEndpoints
+			// already reports this value, and the two disagreeing confused the
+			// UI about which endpoint is actually serving traffic.
+			currentEndpoint := h.proxy.GetCurrentEndpointName()
 
 			event := map[string]interface{}{
 				"type":            "stats",
@@ -78,7 +72,7 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Send event
-			fmt.Fprintf(w, "data: %s\n\n", string(data))
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", string(data))
 			flusher.Flush()
 		}
 	}

@@ -29,9 +29,14 @@ func New(cfg *config.Config, p *proxy.Proxy, storage *storage.SQLiteStorage) *We
 }
 
 // RegisterRoutes registers all web UI routes to the provided mux.
-// The admin API and the static UI are served open — there is no auth.
+//
+// The admin API and the static UI are served without authentication (loopback,
+// single user), but the API is wrapped in two guards: LocalOnlyMiddleware
+// rejects cross-site / DNS-rebound requests, and RecoveryMiddleware turns a
+// panic in a handler into a 500 instead of a torn-down connection.
 func (w *WebUI) RegisterRoutes(mux *http.ServeMux) error {
-	mux.HandleFunc("/api/", w.apiHandler.ServeHTTP)
+	mux.Handle("/api/", api.RecoveryMiddleware(
+		api.LocalOnlyMiddleware(http.HandlerFunc(w.apiHandler.ServeHTTP))))
 
 	uiSubFS, err := fs.Sub(uiFS, "ui")
 	if err != nil {

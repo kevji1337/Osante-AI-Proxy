@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -129,9 +130,21 @@ func (h *Handler) listEndpointCredentials(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// maxCredentialImportBody caps a token-pool import. A pasted pool is kilobytes;
+// anything past a few MiB is a mistake or an attempt to make the admin API
+// allocate without bound.
+const maxCredentialImportBody = 8 << 20 // 8 MiB
+
 func (h *Handler) importEndpointCredentials(w http.ResponseWriter, r *http.Request, endpointName string) {
-	rawBody, err := io.ReadAll(r.Body)
+	defer func() { _ = r.Body.Close() }()
+	rawBody, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxCredentialImportBody))
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			WriteError(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("Request body exceeds %d bytes", maxCredentialImportBody))
+			return
+		}
 		WriteError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -164,26 +177,26 @@ func (h *Handler) importEndpointCredentials(w http.ResponseWriter, r *http.Reque
 	updated := 0
 	skipped := 0
 	failed := 0
-	errors := make([]string, 0)
+	importErrors := make([]string, 0)
 
 	for i, item := range items {
 		if strings.TrimSpace(item.AccessToken) == "" {
 			failed++
-			errors = append(errors, fmt.Sprintf("item[%d]: access_token is required", i))
+			importErrors = append(importErrors, fmt.Sprintf("item[%d]: access_token is required", i))
 			continue
 		}
 
 		expiresAt, err := parseOptionalRFC3339(item.Expired)
 		if err != nil {
 			failed++
-			errors = append(errors, fmt.Sprintf("item[%d]: invalid expired: %v", i, err))
+			importErrors = append(importErrors, fmt.Sprintf("item[%d]: invalid expired: %v", i, err))
 			continue
 		}
 
 		lastRefresh, err := parseOptionalRFC3339(item.LastRefresh)
 		if err != nil {
 			failed++
-			errors = append(errors, fmt.Sprintf("item[%d]: invalid last_refresh: %v", i, err))
+			importErrors = append(importErrors, fmt.Sprintf("item[%d]: invalid last_refresh: %v", i, err))
 			continue
 		}
 
@@ -217,7 +230,7 @@ func (h *Handler) importEndpointCredentials(w http.ResponseWriter, r *http.Reque
 		if existingCred == nil {
 			if err := h.storage.SaveEndpointCredential(&cred); err != nil {
 				failed++
-				errors = append(errors, fmt.Sprintf("item[%d]: save failed: %v", i, err))
+				importErrors = append(importErrors, fmt.Sprintf("item[%d]: save failed: %v", i, err))
 				continue
 			}
 			created++
@@ -249,7 +262,7 @@ func (h *Handler) importEndpointCredentials(w http.ResponseWriter, r *http.Reque
 
 			if err := h.storage.UpdateEndpointCredential(&cred); err != nil {
 				failed++
-				errors = append(errors, fmt.Sprintf("item[%d]: update failed: %v", i, err))
+				importErrors = append(importErrors, fmt.Sprintf("item[%d]: update failed: %v", i, err))
 				continue
 			}
 			updated++
@@ -269,7 +282,7 @@ func (h *Handler) importEndpointCredentials(w http.ResponseWriter, r *http.Reque
 		"skipped":   skipped,
 		"failed":    failed,
 		"processed": len(items),
-		"errors":    errors,
+		"errors":    importErrors,
 	})
 }
 

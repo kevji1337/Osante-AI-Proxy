@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -116,6 +117,22 @@ func prepareCxRespTransformer(endpoint config.Endpoint, endpointTransformer stri
 	return buildFromFactory(cxRespFactory, "Codex Responses", endpoint, endpointTransformer, effectiveModel)
 }
 
+// forwardableClientHeaders is the allowlist of client headers relayed upstream.
+// Everything else — most importantly the client's own Authorization / x-api-key
+// and any Cookie — is dropped, because the endpoint on the other side is often a
+// third party (OpenAI, Google, GitLab, 1min.AI) that has no business seeing the
+// caller's Anthropic key.
+//
+// Keys are in canonical form (http.CanonicalHeaderKey).
+var forwardableClientHeaders = map[string]bool{
+	"Content-Type":      true,
+	"Accept":            true,
+	"Accept-Language":   true,
+	"User-Agent":        true,
+	"Anthropic-Version": true,
+	"Anthropic-Beta":    true,
+}
+
 // getTargetPath determines the target API path based on transformer name
 func getTargetPath(originalPath string, endpoint config.Endpoint, transformedBody []byte, transformerName string, modelName string) string {
 	switch transformerName {
@@ -136,11 +153,25 @@ func getTargetPath(originalPath string, endpoint config.Endpoint, transformedBod
 		var geminiReq struct {
 			Stream bool `json:"stream"`
 		}
-		json.Unmarshal(transformedBody, &geminiReq)
+		if err := json.Unmarshal(transformedBody, &geminiReq); err != nil {
+			// Not fatal: a body we cannot parse just means we cannot tell whether
+			// the caller asked for streaming, so fall through to the unary path.
+			logger.Debug("[%s] Could not inspect gemini payload for stream flag: %v", endpoint.Name, err)
+		}
 		model := strings.TrimSpace(modelName)
 		if model == "" {
 			model = strings.TrimSpace(endpoint.Model)
 		}
+		if model == "" {
+			// Without a model the path degrades to "/v1beta/models/:generateContent",
+			// which the upstream rejects with an opaque error. Keep the original
+			// path so the failure is at least attributable.
+			logger.Warn("[%s] Gemini request has no model, leaving path untouched", endpoint.Name)
+			return originalPath
+		}
+		// The model comes from the client's request body: escape it so a value
+		// like "../../v1/secret" cannot rewrite the upstream path.
+		model = url.PathEscape(model)
 		if geminiReq.Stream {
 			return fmt.Sprintf("/v1beta/models/%s:streamGenerateContent", model)
 		}
@@ -175,15 +206,24 @@ func buildProxyRequest(r *http.Request, endpoint config.Endpoint, apiKey string,
 		return nil, err
 	}
 
-	// Copy headers (except Host and Accept-Encoding)
+	// Forward only an allowlist of client headers. Copying everything (the
+	// previous behavior) leaked the client's own credentials to third parties:
+	// the gemini branch passes the key as a query param and the openai branches
+	// set Authorization, but neither stripped the x-api-key / Authorization the
+	// client had already sent — so an ANTHROPIC_API_KEY traveled to Google or
+	// OpenAI. Cookies went along too.
 	for key, values := range r.Header {
-		if key == "Host" || key == "Accept-Encoding" {
+		if !forwardableClientHeaders[http.CanonicalHeaderKey(key)] {
 			continue
 		}
 		for _, value := range values {
 			proxyReq.Header.Add(key, value)
 		}
 	}
+	// Nothing below should ever see a credential the client supplied.
+	proxyReq.Header.Del("Authorization")
+	proxyReq.Header.Del("X-Api-Key")
+	proxyReq.Header.Del("Cookie")
 
 	// Force gzip or no compression to avoid unsupported encodings (e.g., brotli)
 	proxyReq.Header.Set("Accept-Encoding", "gzip, identity")
@@ -218,9 +258,11 @@ func buildProxyRequest(r *http.Request, endpoint config.Endpoint, apiKey string,
 		proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	// Set Host header
+	// Set the Host used for the upstream request. net/http ignores a "Host" key
+	// in the header map, so the previous Header.Set("Host", …) was a no-op;
+	// req.Host is the field that actually controls the sent Host header.
 	if parsedBase, err := url.Parse(normalizedAPIUrl); err == nil && strings.TrimSpace(parsedBase.Host) != "" {
-		proxyReq.Header.Set("Host", parsedBase.Host)
+		proxyReq.Host = parsedBase.Host
 	}
 	applyCodexCredentialHeaders(proxyReq, credential, requestBody)
 
@@ -376,23 +418,43 @@ func sendRequest(ctx context.Context, proxyReq *http.Request, httpClient *http.C
 	proxyURL := resolveProxyURLForRequest(cfg, proxyReq.URL)
 	// Apply proxy if configured
 	if strings.TrimSpace(proxyURL) != "" {
-		// Clone the client and replace transport for this request
-		clientWithProxy := &http.Client{
-			Timeout: httpClient.Timeout,
-		}
-
-		transport, err := CreateProxyTransport(proxyURL)
+		client, err := proxyClientFor(proxyURL, httpClient.Timeout)
 		if err != nil {
 			logger.Warn("Failed to create proxy transport: %v, using direct connection", err)
-			clientWithProxy.Transport = httpClient.Transport
-		} else {
-			clientWithProxy.Transport = transport
+			return httpClient.Do(proxyReq)
 		}
-
-		return clientWithProxy.Do(proxyReq)
+		return client.Do(proxyReq)
 	}
 
 	return httpClient.Do(proxyReq)
+}
+
+// proxyClients caches one *http.Client (and its *http.Transport) per proxy URL.
+//
+// Building a fresh Transport per request gave every request its own idle
+// connection pool, so nothing was ever reused: a full TCP+TLS handshake on each
+// call, and the sockets plus their readLoop/writeLoop goroutines piled up until
+// IdleConnTimeout (90s). One Transport per distinct proxy URL is both correct and
+// what net/http expects.
+var (
+	proxyClientsMu sync.Mutex
+	proxyClients   = map[string]*http.Client{}
+)
+
+func proxyClientFor(proxyURL string, timeout time.Duration) (*http.Client, error) {
+	proxyClientsMu.Lock()
+	defer proxyClientsMu.Unlock()
+
+	if c, ok := proxyClients[proxyURL]; ok {
+		return c, nil
+	}
+	transport, err := CreateProxyTransport(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	c := &http.Client{Transport: transport, Timeout: timeout}
+	proxyClients[proxyURL] = c
+	return c, nil
 }
 
 func resolveProxyURLForRequest(cfg *config.Config, targetURL *url.URL) string {
@@ -454,7 +516,16 @@ func CreateProxyTransport(proxyURL string) (*http.Transport, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SOCKS5 dialer: %w", err)
 		}
-		transport.Dial = dialer.Dial
+		// DialContext, not the deprecated Dial: with Dial the request context
+		// cannot abort a hung SOCKS5 handshake.
+		if ctxDialer, ok := dialer.(proxy.ContextDialer); ok {
+			transport.DialContext = ctxDialer.DialContext
+		} else {
+			// Fallback for a SOCKS5 dialer that does not implement
+			// ContextDialer. golang.org/x/net/proxy always does today, so this is
+			// defensive; Dial is the only option when it does not.
+			transport.Dial = dialer.Dial //nolint:staticcheck // no context-aware alternative on this path
+		}
 	case "http", "https":
 		transport.Proxy = http.ProxyURL(parsed)
 	default:

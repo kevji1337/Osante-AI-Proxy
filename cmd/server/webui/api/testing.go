@@ -83,8 +83,14 @@ func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey stri
 	switch endpoint.Transformer {
 	case "claude":
 		url = fmt.Sprintf("%s/v1/messages", endpoint.APIUrl)
+		// Prefer the endpoint's configured model: hard-coding one made "Test"
+		// fail on endpoints that don't serve claude-3-5-sonnet-20241022.
+		model := endpoint.Model
+		if model == "" {
+			model = "claude-3-5-sonnet-20241022"
+		}
 		reqBody, err = json.Marshal(map[string]interface{}{
-			"model": "claude-3-5-sonnet-20241022",
+			"model": model,
 			"messages": []map[string]interface{}{
 				{
 					"role":    "user",
@@ -204,15 +210,13 @@ func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey stri
 		req.Header.Set("API-KEY", apiKey)
 	}
 
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
+	client := newOutboundClient(30 * time.Second)
 
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -429,7 +433,13 @@ func (h *Handler) fetchModelsFromProvider(apiUrl, apiKey, transformer string) ([
 
 	switch transformer {
 	case "openai", "openai2":
-		url = fmt.Sprintf("%s/v1/models", apiUrl)
+		// The URL comes from the request body, so it is validated before we
+		// dereference it server-side. See validateOutboundURL / dialGuard.
+		base, err := validateOutboundURL(apiUrl)
+		if err != nil {
+			return nil, err
+		}
+		url = fmt.Sprintf("%s/v1/models", strings.TrimRight(base.String(), "/"))
 		authHeader = "Bearer " + apiKey
 	case "claude":
 		// Claude doesn't have a models endpoint, return known models
@@ -500,15 +510,13 @@ func (h *Handler) fetchModelsFromProvider(apiUrl, apiKey, transformer string) ([
 
 	req.Header.Set("Authorization", authHeader)
 
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
+	client := newOutboundClient(10 * time.Second)
 
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
