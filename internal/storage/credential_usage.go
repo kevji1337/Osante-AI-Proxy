@@ -40,7 +40,7 @@ func (s *SQLiteStorage) GetCredentialUsageByEndpoint(endpointName string) (map[i
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := make(map[int64]*CredentialUsage)
 	for rows.Next() {
@@ -61,4 +61,54 @@ func (s *SQLiteStorage) GetCredentialUsageByEndpoint(endpointName string) (map[i
 		result[id] = usage
 	}
 	return result, nil
+}
+
+// RecordCredentialSuccess folds the two writes a successful request used to make
+// against the credential (usage counters + "this token works") into one
+// transaction, so a proxied request takes one trip through the single-writer
+// SQLite lock instead of two.
+func (s *SQLiteStorage) RecordCredentialSuccess(credentialID int64, endpointName string, inputTokens, outputTokens int, now time.Time) error {
+	if s == nil || credentialID <= 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`
+		INSERT INTO credential_usage (
+			credential_id, endpoint_name, requests, errors, input_tokens, output_tokens, updated_at
+		) VALUES (?, ?, 1, 0, ?, ?, ?)
+		ON CONFLICT(credential_id) DO UPDATE SET
+			endpoint_name=excluded.endpoint_name,
+			requests=requests + excluded.requests,
+			input_tokens=input_tokens + excluded.input_tokens,
+			output_tokens=output_tokens + excluded.output_tokens,
+			updated_at=excluded.updated_at
+	`, credentialID, endpointName, inputTokens, outputTokens, now.UTC()); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(`
+		UPDATE endpoint_credentials
+		SET
+			status=?,
+			failure_count=0,
+			cooldown_until=NULL,
+			last_error='',
+			last_checked_at=?,
+			last_used_at=?,
+			updated_at=CURRENT_TIMESTAMP
+		WHERE id=?
+	`, credentialStatusActive, now.UTC(), now.UTC(), credentialID); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }

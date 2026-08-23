@@ -138,7 +138,6 @@ type Storage interface {
 	// Stats
 	RecordDailyStat(stat *DailyStat) error
 	GetDailyStats(endpointName, startDate, endDate string) ([]DailyStat, error)
-	GetAllStats() (map[string][]DailyStat, error)
 	GetTotalStats() (int, map[string]*EndpointStats, error)
 	GetEndpointTotalStats(endpointName string) (*EndpointStats, error)
 	GetPeriodStatsAggregated(startDate, endDate string) (map[string]*EndpointStats, error)

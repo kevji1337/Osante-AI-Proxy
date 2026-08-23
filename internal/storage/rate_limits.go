@@ -12,9 +12,7 @@ func (s *SQLiteStorage) UpsertCredentialRateLimits(credentialID int64, data *Cod
 		return fmt.Errorf("credential id is required")
 	}
 
-	if len(errMsg) > 500 {
-		errMsg = errMsg[:500]
-	}
+	errMsg = truncateErrMsg(errMsg)
 
 	var payload sql.NullString
 	if data != nil {
@@ -117,7 +115,7 @@ func (s *SQLiteStorage) GetCredentialRateLimitsByEndpoint(endpointName string) (
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := make(map[int64]*CredentialRateLimits)
 	for rows.Next() {

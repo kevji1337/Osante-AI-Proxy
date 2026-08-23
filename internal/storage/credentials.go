@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -142,7 +143,13 @@ func scanCredential(scanner interface {
 func (s *SQLiteStorage) GetEndpointCredentials(endpointName string) ([]EndpointCredential, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.queryEndpointCredentials(endpointName)
+}
 
+// queryEndpointCredentials is GetEndpointCredentials without the lock, so
+// callers that already hold s.mu (the claim path below) can reuse it. Go's
+// RWMutex is not reentrant, so this split is required rather than cosmetic.
+func (s *SQLiteStorage) queryEndpointCredentials(endpointName string) ([]EndpointCredential, error) {
 	// Ordering: enabled first; non-cooldown ahead of cooldown; among cooldown
 	// rows, the ones that come back online soonest first; finally tie-break
 	// by failure_count, oldest last-used, updated_at.
@@ -168,7 +175,7 @@ func (s *SQLiteStorage) GetEndpointCredentials(endpointName string) ([]EndpointC
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	credentials := make([]EndpointCredential, 0)
 	now := time.Now().UTC()
@@ -389,7 +396,7 @@ func (s *SQLiteStorage) GetAllTokenPoolStats() (map[string]TokenPoolStats, error
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	now := time.Now().UTC()
 	stats := make(map[string]TokenPoolStats)
@@ -406,18 +413,43 @@ func (s *SQLiteStorage) GetAllTokenPoolStats() (map[string]TokenPoolStats, error
 	return stats, rows.Err()
 }
 
+// GetUsableEndpointCredential picks the next token to serve a request with and
+// claims it by stamping last_used_at.
+//
+// The claim is what makes rotation work under concurrency. The pool ordering
+// tie-breaks on COALESCE(last_used_at, created_at) ASC, but last_used_at used to
+// be written only on success (MarkCredentialSuccess), so parallel in-flight
+// requests — Claude Code routinely opens several — all selected the same token
+// and burned one token's quota first while the rest of the pool sat idle.
+//
+// Selection and claim run under s.mu (write lock) so they are atomic against
+// other selections in this process.
 func (s *SQLiteStorage) GetUsableEndpointCredential(endpointName string, now time.Time) (*EndpointCredential, error) {
-	credentials, err := s.GetEndpointCredentials(endpointName)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	credentials, err := s.queryEndpointCredentials(endpointName)
 	if err != nil {
 		return nil, err
 	}
 
 	for i := range credentials {
 		status := deriveCredentialStatus(&credentials[i], now)
-		if status == credentialStatusActive || status == credentialStatusExpiring || status == credentialStatusNeedRefresh {
-			credentials[i].Status = status
-			return &credentials[i], nil
+		if status != credentialStatusActive && status != credentialStatusExpiring && status != credentialStatusNeedRefresh {
+			continue
 		}
+		claimedAt := now.UTC()
+		if _, err := s.db.Exec(
+			`UPDATE endpoint_credentials SET last_used_at=? WHERE id=?`,
+			claimedAt, credentials[i].ID,
+		); err != nil {
+			// A failed claim is not fatal: the token is still usable, we just
+			// lose the rotation hint for this request.
+			return nil, fmt.Errorf("failed to claim credential %d: %w", credentials[i].ID, err)
+		}
+		credentials[i].Status = status
+		credentials[i].LastUsedAt = &claimedAt
+		return &credentials[i], nil
 	}
 
 	return nil, nil
@@ -475,9 +507,7 @@ func (s *SQLiteStorage) MarkCredentialFailure(id int64, statusCode int, errMsg s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if len(errMsg) > 500 {
-		errMsg = errMsg[:500]
-	}
+	errMsg = truncateErrMsg(errMsg)
 
 	switch statusCode {
 	case 401, 403:
@@ -507,16 +537,21 @@ func (s *SQLiteStorage) MarkCredentialFailure(id int64, statusCode int, errMsg s
 		`, credentialStatusCooldown, cooldownUntil, errMsg, now.UTC(), id)
 		return err
 	default:
+		// Do NOT write status here. This branch also catches statusCode == 0,
+		// which the proxy uses for transport errors and for failures it has
+		// explicitly decided not to blame on the credential. Setting
+		// status='active' resurrected tokens that a previous 401 had marked
+		// invalid — deriveCredentialStatus reads the stored status, so one
+		// unrelated network error un-quarantined a dead token.
 		_, err := s.db.Exec(`
 			UPDATE endpoint_credentials
 			SET
-				status=?,
 				failure_count=failure_count+1,
 				last_error=?,
 				last_checked_at=?,
 				updated_at=CURRENT_TIMESTAMP
 			WHERE id=?
-		`, credentialStatusActive, errMsg, now.UTC(), id)
+		`, errMsg, now.UTC(), id)
 		return err
 	}
 }
@@ -530,9 +565,7 @@ func (s *SQLiteStorage) MarkCredentialUsageLimit(id int64, errMsg string, cooldo
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if len(errMsg) > 500 {
-		errMsg = errMsg[:500]
-	}
+	errMsg = truncateErrMsg(errMsg)
 
 	_, err := s.db.Exec(`
 		UPDATE endpoint_credentials
@@ -546,4 +579,20 @@ func (s *SQLiteStorage) MarkCredentialUsageLimit(id int64, errMsg string, cooldo
 		WHERE id=?
 	`, credentialStatusCooldown, cooldownUntil.UTC(), errMsg, now.UTC(), id)
 	return err
+}
+
+// truncateErrMsg caps an upstream error message at the column width used by
+// endpoint_credentials.last_error / credential_rate_limits, cutting on a rune
+// boundary. A plain errMsg[:500] can split a multi-byte sequence and store
+// invalid UTF-8, which then renders as mojibake in the web UI.
+func truncateErrMsg(errMsg string) string {
+	const maxErrMsgBytes = 500
+	if len(errMsg) <= maxErrMsgBytes {
+		return errMsg
+	}
+	cut := maxErrMsgBytes
+	for cut > 0 && !utf8.RuneStart(errMsg[cut]) {
+		cut--
+	}
+	return errMsg[:cut]
 }
