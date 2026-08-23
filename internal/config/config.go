@@ -9,6 +9,15 @@ import (
 	"strings"
 )
 
+// DefaultPort is the listen port for fresh installs.
+//
+// Deliberately below 49152: ports above that are Windows' dynamic/ephemeral
+// range, and Hyper-V / WSL / Docker NAT reserve 100-port blocks inside it that
+// move between reboots. Binding one of those blocks fails with WSAEACCES
+// ("socket in a way forbidden by its access permissions") even though nothing
+// is listening, which is exactly what happened to the previous default 52710.
+const DefaultPort = 12710
+
 const (
 	AuthModeAPIKey         = "api_key"
 	AuthModeTokenPool      = "token_pool"
@@ -95,7 +104,7 @@ func isCodexBackendAPIURL(raw string) bool {
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Port:                      52710,
+		Port:                      DefaultPort,
 		LogLevel:                  1,    // Default to INFO level
 		Language:                  "en", // English only
 		WindowWidth:               1024, // Default window width
@@ -172,6 +181,15 @@ func (c *Config) GetLogLevel() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.LogLevel
+}
+
+// GetModelsCacheRefreshEnabled reports whether the background /v1/models cache
+// refresh is on. Read under the lock like every other field: the proxy used to
+// read c.ModelsCacheRefreshEnabled directly, bypassing this mutex.
+func (c *Config) GetModelsCacheRefreshEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.ModelsCacheRefreshEnabled
 }
 
 // UpdateEndpoints updates the endpoints (thread-safe)
@@ -320,7 +338,13 @@ func (c *Config) UpdateAutoDarkTheme(theme string) {
 func (c *Config) GetWebDAV() *WebDAVConfig {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.WebDAV
+	if c.WebDAV == nil {
+		return nil
+	}
+	// Copy: handing out the shared pointer let callers read fields outside the
+	// lock while UpdateWebDAV mutated them.
+	cp := *c.WebDAV
+	return &cp
 }
 
 // UpdateWebDAV updates the WebDAV configuration (thread-safe)
@@ -334,7 +358,11 @@ func (c *Config) UpdateWebDAV(webdav *WebDAVConfig) {
 func (c *Config) GetBackup() *BackupConfig {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.Backup
+	if c.Backup == nil {
+		return nil
+	}
+	cp := *c.Backup
+	return &cp
 }
 
 // UpdateBackup updates the backup configuration (thread-safe)
@@ -354,7 +382,8 @@ func (c *Config) GetUpdate() *UpdateConfig {
 			CheckInterval: 24,
 		}
 	}
-	return c.Update
+	cp := *c.Update
+	return &cp
 }
 
 // UpdateUpdate updates the Update configuration (thread-safe)
@@ -375,7 +404,10 @@ func (c *Config) GetTerminal() *TerminalConfig {
 			ClaudeCommand:    "",
 		}
 	}
-	return c.Terminal
+	cp := *c.Terminal
+	// The slice header would still alias the original backing array.
+	cp.ProjectDirs = append([]string(nil), c.Terminal.ProjectDirs...)
+	return &cp
 }
 
 // UpdateTerminal updates the Terminal configuration (thread-safe)
@@ -389,7 +421,11 @@ func (c *Config) UpdateTerminal(terminal *TerminalConfig) {
 func (c *Config) GetProxy() *ProxyConfig {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.Proxy
+	if c.Proxy == nil {
+		return nil
+	}
+	cp := *c.Proxy
+	return &cp
 }
 
 // UpdateProxy updates the Proxy configuration (thread-safe)
@@ -403,7 +439,11 @@ func (c *Config) UpdateProxy(proxy *ProxyConfig) {
 func (c *Config) GetCodexProxy() *ProxyConfig {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.CodexProxy
+	if c.CodexProxy == nil {
+		return nil
+	}
+	cp := *c.CodexProxy
+	return &cp
 }
 
 // UpdateCodexProxy updates the Codex dedicated proxy configuration (thread-safe)
@@ -487,7 +527,7 @@ func LoadFromStorage(storage StorageAdapter) (*Config, error) {
 		}
 	}
 	if config.Port == 0 {
-		config.Port = 52710
+		config.Port = DefaultPort
 	}
 
 	if logLevelStr, err := storage.GetConfig("logLevel"); err == nil && logLevelStr != "" {
@@ -509,7 +549,9 @@ func LoadFromStorage(storage StorageAdapter) (*Config, error) {
 		config.ModelsCacheRefreshEnabled = modelsCacheRefreshEnabledStr == "true"
 	}
 
-	if lang, err := storage.GetConfig("language"); err == nil {
+	// GetConfig returns ("", nil) for a key that isn't stored, so without the
+	// emptiness check a fresh database wiped the "en" default.
+	if lang, err := storage.GetConfig("language"); err == nil && lang != "" {
 		config.Language = lang
 	}
 
@@ -874,7 +916,6 @@ func (c *Config) SaveToStorage(storage StorageAdapter) error {
 		if err := storage.SetConfig("terminal_claudeCommand", c.Terminal.ClaudeCommand); err != nil {
 			return fmt.Errorf("failed to save terminal_claudeCommand config: %w", err)
 		}
-		storage.SetConfig("terminal_claudeCommand", c.Terminal.ClaudeCommand)
 	}
 
 	// Save Proxy config

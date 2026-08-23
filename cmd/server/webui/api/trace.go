@@ -7,7 +7,7 @@ import (
 )
 
 // handleTrace returns the most recent request traces from the proxy's
-// in-memory ring. Used by the "Inspector" admin view to visualise per-stage
+// in-memory ring. Used by the "Inspector" admin view to visualize per-stage
 // timings (received → transformed → upstream sent → ... → done).
 //
 // Query params:

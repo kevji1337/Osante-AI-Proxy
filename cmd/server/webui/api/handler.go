@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/kevji1337/Osante-AI-Proxy/internal/config"
 	"github.com/kevji1337/Osante-AI-Proxy/internal/proxy"
@@ -14,18 +15,28 @@ import (
 // The admin API is unauthenticated by design: this is a local-loopback proxy
 // for a single user, the BasicAuth flow has been removed entirely.
 type Handler struct {
-	config  *config.Config
+	// config is replaced by reloadConfig from whichever HTTP goroutine handled
+	// the write, while other goroutines (getConfig, handleEvents, exports) read
+	// it concurrently. It used to be a bare pointer assignment with no
+	// synchronization at all.
+	config  atomic.Pointer[config.Config]
 	proxy   *proxy.Proxy
 	storage *storage.SQLiteStorage
 }
 
 // NewHandler creates a new API handler
 func NewHandler(cfg *config.Config, p *proxy.Proxy, s *storage.SQLiteStorage) *Handler {
-	return &Handler{
-		config:  cfg,
+	h := &Handler{
 		proxy:   p,
 		storage: s,
 	}
+	h.config.Store(cfg)
+	return h
+}
+
+// cfg returns the configuration currently in effect. Never nil after NewHandler.
+func (h *Handler) cfg() *config.Config {
+	return h.config.Load()
 }
 
 // ServeHTTP implements http.Handler interface

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -264,8 +265,9 @@ func (h *Handler) createEndpoint(w http.ResponseWriter, r *http.Request) {
 
 	// Seed the new pool with the apiKey the user provided in the form, so the
 	// endpoint is immediately usable without a separate Token Pool import step.
-	if seedKey != "" {
-		h.seedTokenPoolFromAPIKey(endpoint.Name, seedKey)
+	tokenAdded, tokenErr := h.addTokenToPool(endpoint.Name, seedKey)
+	if tokenErr != nil {
+		logger.Warn("Endpoint %s created, but its api key could not be stored: %v", endpoint.Name, tokenErr)
 	}
 
 	// Update proxy config
@@ -274,7 +276,24 @@ func (h *Handler) createEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 
 	endpoint.APIKey = maskAPIKey(endpoint.APIKey)
-	WriteSuccess(w, endpoint)
+	WriteSuccess(w, endpointSaveResult{Endpoint: endpoint, TokenAdded: tokenAdded, TokenError: errText(tokenErr)})
+}
+
+// endpointSaveResult is what create/update return. The endpoint fields stay at
+// the top level so existing UI code keeps working; tokenAdded / tokenError report
+// what happened to the api key that came with the request, which the caller
+// otherwise had no way to find out (it used to be dropped in silence).
+type endpointSaveResult struct {
+	*storage.Endpoint
+	TokenAdded bool   `json:"tokenAdded"`
+	TokenError string `json:"tokenError,omitempty"`
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // updateEndpoint updates an existing endpoint
@@ -326,6 +345,16 @@ func (h *Handler) updateEndpoint(w http.ResponseWriter, r *http.Request, name st
 	if req.Name != "" {
 		existing.Name = req.Name
 	}
+	if existing.Name != name {
+		// endpoints.name is UNIQUE; catch the collision here so the client gets
+		// 409 instead of a raw SQLite constraint error.
+		for i := range endpoints {
+			if endpoints[i].Name == existing.Name {
+				WriteError(w, http.StatusConflict, "Endpoint with this name already exists")
+				return
+			}
+		}
+	}
 	if req.APIUrl != "" {
 		existing.APIUrl = normalizeAPIUrl(req.APIUrl)
 	}
@@ -369,13 +398,29 @@ func (h *Handler) updateEndpoint(w http.ResponseWriter, r *http.Request, name st
 		return
 	}
 
-	// Migrate the previous single api-key into the new token pool when the
-	// user just switched api_key -> token_pool, so the existing key is not
-	// silently lost. Only seed when the pool has no usable token yet.
-	if previousAuthMode == config.AuthModeAPIKey &&
-		config.IsTokenPoolAuthMode(existing.AuthMode) &&
-		previousAPIKey != "" {
-		h.seedTokenPoolFromAPIKey(existing.Name, previousAPIKey)
+	// Runtime state (cooldown, last error) is keyed by name, so a rename would
+	// otherwise leave the old name behind as a ghost in /health and the UI.
+	if existing.Name != name {
+		h.proxy.ForgetEndpointState(name)
+		logger.Info("Endpoint renamed: %s -> %s (credentials and stats moved)", name, existing.Name)
+	}
+
+	// A key typed into the edit form has to land in the token pool. Endpoint.APIKey
+	// is cleared for token_pool endpoints, so before this the key was accepted,
+	// wiped by ApplyEndpointAuthModeRules and silently lost — the UI reported
+	// "endpoint updated" while nothing had been stored.
+	tokenAdded, tokenErr := h.addTokenToPool(existing.Name, req.APIKey)
+	if tokenErr != nil {
+		logger.Warn("Endpoint %s updated, but its api key could not be stored: %v", existing.Name, tokenErr)
+	}
+
+	// Legacy path: an endpoint imported with auth_mode=api_key carries its key on
+	// the endpoint row. Move it into the pool so it is not lost on the migration
+	// to token_pool.
+	if previousAuthMode == config.AuthModeAPIKey && previousAPIKey != "" {
+		if _, err := h.addTokenToPool(existing.Name, previousAPIKey); err != nil {
+			logger.Warn("Failed to migrate the previous api key of %s: %v", existing.Name, err)
+		}
 	}
 
 	// Update proxy config
@@ -384,35 +429,68 @@ func (h *Handler) updateEndpoint(w http.ResponseWriter, r *http.Request, name st
 	}
 
 	existing.APIKey = maskAPIKey(existing.APIKey)
-	WriteSuccess(w, existing)
+	WriteSuccess(w, endpointSaveResult{Endpoint: existing, TokenAdded: tokenAdded, TokenError: errText(tokenErr)})
 }
 
 // seedTokenPoolFromAPIKey inserts the previous endpoint api_key as the first
 // credential of the token pool when the pool is otherwise empty. Failures are
 // logged but never block the endpoint update.
-func (h *Handler) seedTokenPoolFromAPIKey(endpointName, apiKey string) {
+// looksLikeMaskedKey reports whether a value is one of the masked forms the API
+// hands out (maskAPIKey -> "****abcd", the UI's edit form -> "****"). Storing one
+// as a pool token would put a dead credential into rotation, so any read-modify-
+// write of an endpoint must not be able to do that.
+func looksLikeMaskedKey(key string) bool {
+	return strings.HasPrefix(strings.TrimSpace(key), "****")
+}
+
+// addTokenToPool puts an API key into the endpoint's token pool.
+//
+// Token Pool is the only auth mode in this build: Endpoint.APIKey is always
+// cleared by ApplyEndpointAuthModeRules, so a key typed into the endpoint form is
+// only ever meaningful as a pool token. Both create and update funnel through
+// here, which is what the form's own hint promises ("if provided, becomes the
+// first token in the pool").
+//
+// Returns whether a token was actually added. Adding the same key twice is a
+// no-op rather than a duplicate.
+func (h *Handler) addTokenToPool(endpointName, apiKey string) (bool, error) {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return false, nil
+	}
+	if looksLikeMaskedKey(apiKey) {
+		logger.Debug("Ignoring masked api key for %s (nothing was typed into the field)", endpointName)
+		return false, nil
+	}
+
 	existing, err := h.storage.GetEndpointCredentials(endpointName)
 	if err != nil {
-		logger.Warn("Failed to read credentials for %s while seeding api key: %v", endpointName, err)
-		return
+		return false, fmt.Errorf("failed to read the token pool: %w", err)
 	}
-	if len(existing) > 0 {
-		return
+	for i := range existing {
+		if strings.TrimSpace(existing[i].AccessToken) == apiKey {
+			logger.Debug("Token already in the pool of %s, not adding a duplicate", endpointName)
+			return false, nil
+		}
+	}
+
+	remark := "Added from the endpoint form"
+	if len(existing) == 0 {
+		remark = "First token, added from the endpoint form"
 	}
 	cred := &storage.EndpointCredential{
 		EndpointName: endpointName,
 		ProviderType: "api_key",
-		AccountID:    "legacy-api-key",
 		AccessToken:  apiKey,
 		Status:       "active",
 		Enabled:      true,
-		Remark:       "Migrated from endpoint apiKey",
+		Remark:       remark,
 	}
 	if err := h.storage.SaveEndpointCredential(cred); err != nil {
-		logger.Warn("Failed to seed token pool for %s from api key: %v", endpointName, err)
-		return
+		return false, fmt.Errorf("failed to save the token: %w", err)
 	}
-	logger.Info("Migrated endpoint %s api key into token pool as first token", endpointName)
+	logger.Info("Added an api key to the token pool of %s (pool now has %d tokens)", endpointName, len(existing)+1)
+	return true, nil
 }
 
 // deleteEndpoint deletes an endpoint
@@ -422,6 +500,11 @@ func (h *Handler) deleteEndpoint(w http.ResponseWriter, r *http.Request, name st
 		WriteError(w, http.StatusInternalServerError, "Failed to delete endpoint")
 		return
 	}
+
+	// The runtime state map is keyed by endpoint name and nothing else prunes
+	// it, so without this the deleted endpoint keeps appearing in /health and
+	// in the UI status badges until restart.
+	h.proxy.ForgetEndpointState(name)
 
 	// Update proxy config
 	if err := h.reloadConfig(); err != nil {
@@ -496,28 +579,23 @@ func (h *Handler) handleCurrentEndpoint(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	endpoints := h.config.GetEndpoints()
+	endpoints := h.cfg().GetEndpoints()
 	if len(endpoints) == 0 {
 		WriteError(w, http.StatusNotFound, "No endpoints configured")
 		return
 	}
 
-	// Get enabled endpoints
-	var enabledEndpoints []config.Endpoint
-	for _, ep := range endpoints {
-		if ep.Enabled {
-			enabledEndpoints = append(enabledEndpoints, ep)
-		}
-	}
-
-	if len(enabledEndpoints) == 0 {
+	// The real rotation index, not "first enabled": listEndpoints already
+	// reports GetCurrentEndpointName(), and the two disagreeing made the UI
+	// highlight one endpoint while traffic went to another.
+	name := h.proxy.GetCurrentEndpointName()
+	if name == "" {
 		WriteError(w, http.StatusNotFound, "No enabled endpoints")
 		return
 	}
 
-	// Return first enabled endpoint as current
 	WriteSuccess(w, map[string]interface{}{
-		"name": enabledEndpoints[0].Name,
+		"name": name,
 	})
 }
 
@@ -537,18 +615,12 @@ func (h *Handler) handleSwitchEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify endpoint exists
-	endpoints := h.config.GetEndpoints()
-	found := false
-	for _, ep := range endpoints {
-		if ep.Name == req.Name && ep.Enabled {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		WriteError(w, http.StatusNotFound, "Endpoint not found or not enabled")
+	// SetCurrentEndpoint does the existence + enabled check itself, moves the
+	// rotation index and cancels in-flight requests on the endpoint we are
+	// leaving. The handler used to only validate the name and then report
+	// success without switching anything.
+	if err := h.proxy.SetCurrentEndpoint(req.Name); err != nil {
+		WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 
@@ -617,7 +689,7 @@ func (h *Handler) reloadConfig() error {
 		return err
 	}
 
-	h.config = cfg
+	h.config.Store(cfg)
 	return h.proxy.UpdateConfig(cfg)
 }
 

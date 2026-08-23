@@ -122,11 +122,11 @@ func (l *Logger) Log(level LogLevel, format string, args ...interface{}) {
 	}
 
 	l.mu.Lock()
-	defer l.mu.Unlock()
 
 	// Re-check under the write lock — minLevel might have moved between the
 	// RLock check and us acquiring the write lock.
 	if level < l.minLevel {
+		l.mu.Unlock()
 		return
 	}
 
@@ -147,10 +147,12 @@ func (l *Logger) Log(level LogLevel, format string, args ...interface{}) {
 		l.entries = l.entries[len(l.entries)-l.maxSize:]
 	}
 
-	// Print to console only if level >= consoleLevel
-	if level >= l.consoleLevel {
-		fmt.Printf("%s [%s] %s\n", entry.Icon, entry.LevelStr, entry.Message)
-	}
+	// Whether to echo to the console is decided here but printed after the lock
+	// is released (bottom of this function): a console write on Windows is
+	// synchronous and slow, and holding l.mu across it serializes every logging
+	// goroutine behind it.
+	printToConsole := level >= l.consoleLevel
+	l.mu.Unlock()
 
 	// Fan-out to SSE subscribers. Non-blocking: a slow subscriber misses
 	// entries rather than holding up the logger lock. We snapshot the
@@ -164,6 +166,10 @@ func (l *Logger) Log(level LogLevel, format string, args ...interface{}) {
 		}
 	}
 	l.subsMu.RUnlock()
+
+	if printToConsole {
+		fmt.Printf("%s [%s] %s\n", entry.Icon, entry.LevelStr, entry.Message)
+	}
 }
 
 // Subscribe registers a buffered channel that receives every new log entry
@@ -246,11 +252,13 @@ func Error(format string, args ...interface{}) {
 
 // EnableDebugFile enables debug file logging (only in debug mode)
 func (l *Logger) EnableDebugFile(filepath string) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	// debugMu, not mu: DebugLog and Close guard debugFile with debugMu, so
+	// using a different mutex here left the field genuinely unsynchronised.
+	l.debugMu.Lock()
+	defer l.debugMu.Unlock()
 
 	if l.debugFile != nil {
-		l.debugFile.Close()
+		_ = l.debugFile.Close()
 	}
 
 	f, err := os.OpenFile(filepath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -259,6 +267,16 @@ func (l *Logger) EnableDebugFile(filepath string) error {
 	}
 	l.debugFile = f
 	return nil
+}
+
+// DebugEnabled reports whether a debug sink is attached. Hot call sites should
+// gate on this: DebugLog is a no-op without a debug file, but the caller still
+// pays for its arguments - string(eventData) copies every SSE event, per event,
+// for a log line that is then dropped.
+func (l *Logger) DebugEnabled() bool {
+	l.debugMu.Lock()
+	defer l.debugMu.Unlock()
+	return l.debugFile != nil
 }
 
 // DebugLog writes to debug.log file (bypasses log level)
@@ -272,14 +290,14 @@ func (l *Logger) DebugLog(format string, args ...interface{}) {
 
 	message := fmt.Sprintf(format, args...)
 	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
-	fmt.Fprintf(l.debugFile, "[%s] %s\n", timestamp, message)
+	_, _ = fmt.Fprintf(l.debugFile, "[%s] %s\n", timestamp, message)
 }
 
 // Close closes the debug log file
 func (l *Logger) Close() {
 	l.debugMu.Lock()
 	if l.debugFile != nil {
-		l.debugFile.Close()
+		_ = l.debugFile.Close()
 		l.debugFile = nil
 	}
 	l.debugMu.Unlock()
@@ -288,4 +306,14 @@ func (l *Logger) Close() {
 // DebugLog writes to debug.log file (convenience function)
 func DebugLog(format string, args ...interface{}) {
 	GetLogger().DebugLog(format, args...)
+}
+
+// DebugEnabled reports whether a debug sink is attached (convenience function).
+// Gate expensive argument construction on this, e.g.:
+//
+//	if logger.DebugEnabled() {
+//		logger.DebugLog("body: %s", string(body))
+//	}
+func DebugEnabled() bool {
+	return GetLogger().DebugEnabled()
 }

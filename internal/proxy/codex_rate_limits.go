@@ -177,7 +177,7 @@ func (p *Proxy) fetchCodexRateLimitsForCredential(ctx context.Context, endpoint 
 	if err != nil {
 		return nil, "network", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -268,12 +268,12 @@ func (p *Proxy) codexRateLimitHTTPClient() *http.Client {
 	if p != nil && p.httpClient != nil {
 		client.Transport = p.httpClient.Transport
 	}
-	if p == nil || p.config == nil {
+	if p == nil || p.cfg() == nil {
 		return client
 	}
 
-	proxyCfg := p.config.GetProxy()
-	codexProxyCfg := p.config.GetCodexProxy()
+	proxyCfg := p.cfg().GetProxy()
+	codexProxyCfg := p.cfg().GetCodexProxy()
 	proxyURL := ""
 	if codexProxyCfg != nil && strings.TrimSpace(codexProxyCfg.URL) != "" {
 		proxyURL = codexProxyCfg.URL
@@ -283,12 +283,14 @@ func (p *Proxy) codexRateLimitHTTPClient() *http.Client {
 	if strings.TrimSpace(proxyURL) == "" {
 		return client
 	}
-	transport, err := CreateProxyTransport(proxyURL)
+	// Reuse the cached per-proxy transport rather than building one per call;
+	// every fresh Transport carries its own idle-connection pool.
+	cached, err := proxyClientFor(proxyURL, client.Timeout)
 	if err != nil {
 		logger.Warn("Failed to create proxy transport for rate limits: %v", err)
 		return client
 	}
-	client.Transport = transport
+	client.Transport = cached.Transport
 	logger.Debug("Using proxy for rate limits: %s", proxyURL)
 	return client
 }

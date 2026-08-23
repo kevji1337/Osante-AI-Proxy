@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kevji1337/Osante-AI-Proxy/internal/config"
@@ -33,27 +34,31 @@ type APIResponse struct {
 
 // Proxy represents the proxy server
 type Proxy struct {
-	config            *config.Config
-	storage           *storage.SQLiteStorage
-	stats             *Stats
-	currentIndex      int
-	mu                sync.RWMutex
-	server            *http.Server
-	httpClient        *http.Client                     // Reusable HTTP client with connection pool
-	activeRequests    map[string]int                   // # in-flight requests per endpoint name (rotateEndpoint waits while > 0)
-	activeRequestsMu  sync.RWMutex                     // protects activeRequests map
-	endpointCtx       map[string]context.Context       // context per endpoint for cancellation
-	endpointCancel    map[string]context.CancelFunc    // cancel functions per endpoint
-	ctxMu             sync.RWMutex                     // protects context maps
-	onEndpointSuccess func(endpointName string)        // callback when endpoint request succeeds
-	modelsCache       *ModelsCache                     // Cache for /v1/models endpoint
-	resolver          *EndpointResolver                // resolves the endpoint a client specifically targets
-	endpointStates    map[string]*endpointRuntimeState // per-endpoint runtime state (cooldown / last error)
-	stateMu           sync.RWMutex                     // protects endpointStates
-	usageLimitLogged  map[string]time.Time             // last "hit usage limit" log time per (endpoint, credentialID)
-	usageLimitLogMu   sync.Mutex                       // protects usageLimitLogged
-	startedAt         time.Time                        // process start time (for /health uptime)
-	traceRing         *TraceRing                       // bounded ring of recent request traces for the inspector view
+	// config is swapped wholesale by UpdateConfig while requests are in flight.
+	// An atomic pointer keeps every reader consistent without making them all
+	// take p.mu (they didn't, which was a real data race — and a plain pointer
+	// assignment is not atomic on 32-bit builds, which this project ships).
+	config           atomic.Pointer[config.Config]
+	storage          *storage.SQLiteStorage
+	stats            *Stats
+	currentIndex     int
+	mu               sync.RWMutex
+	server           *http.Server
+	httpClient       *http.Client                     // Reusable HTTP client with connection pool
+	activeRequests   map[string]int                   // # in-flight requests per endpoint name (rotateEndpoint waits while > 0)
+	activeRequestsMu sync.RWMutex                     // protects activeRequests map
+	endpointCtx      map[string]context.Context       // context per endpoint for cancellation
+	endpointCancel   map[string]context.CancelFunc    // cancel functions per endpoint
+	ctxMu            sync.RWMutex                     // protects context maps
+	modelsCache      *ModelsCache                     // Cache for /v1/models endpoint
+	modelsFetchMu    sync.Mutex                       // serializes /v1/models cache misses (stampede guard)
+	resolver         *EndpointResolver                // resolves the endpoint a client specifically targets
+	endpointStates   map[string]*endpointRuntimeState // per-endpoint runtime state (cooldown / last error)
+	stateMu          sync.RWMutex                     // protects endpointStates
+	usageLimitLogged map[string]time.Time             // last "hit usage limit" log time per (endpoint, credentialID)
+	usageLimitLogMu  sync.Mutex                       // protects usageLimitLogged
+	startedAt        time.Time                        // process start time (for /health uptime)
+	traceRing        *TraceRing                       // bounded ring of recent request traces for the inspector view
 }
 
 // New creates a new Proxy instance
@@ -83,8 +88,7 @@ func New(cfg *config.Config, statsStorage StatsStorage, sqliteStorage *storage.S
 		},
 	}
 
-	return &Proxy{
-		config:           cfg,
+	p := &Proxy{
 		storage:          sqliteStorage,
 		stats:            stats,
 		currentIndex:     0,
@@ -93,12 +97,26 @@ func New(cfg *config.Config, statsStorage StatsStorage, sqliteStorage *storage.S
 		endpointCtx:      make(map[string]context.Context),
 		endpointCancel:   make(map[string]context.CancelFunc),
 		modelsCache:      NewModelsCache(cfg.ModelsCacheTTL),
-		resolver:         NewEndpointResolverWithFunc(cfg.GetEndpoints),
 		endpointStates:   make(map[string]*endpointRuntimeState),
 		usageLimitLogged: make(map[string]time.Time),
 		startedAt:        time.Now().UTC(),
 		traceRing:        NewTraceRing(64),
 	}
+	p.config.Store(cfg)
+	// Read the endpoint list through p.cfg() rather than binding cfg.GetEndpoints
+	// here: a bound method value pins the config object it was created from, so
+	// the resolver kept answering from the pre-UpdateConfig snapshot forever and
+	// endpoints added or renamed via the admin API were unaddressable until
+	// restart.
+	p.resolver = NewEndpointResolverWithFunc(func() []config.Endpoint {
+		return p.cfg().GetEndpoints()
+	})
+	return p
+}
+
+// cfg returns the configuration currently in effect. Never nil after New.
+func (p *Proxy) cfg() *config.Config {
+	return p.config.Load()
 }
 
 // shouldLogUsageLimit reports whether to emit the per-token "hit usage limit"
@@ -132,11 +150,6 @@ func (p *Proxy) shouldLogDedup(key string, window time.Duration) bool {
 	return true
 }
 
-// SetOnEndpointSuccess sets the callback for successful endpoint requests
-func (p *Proxy) SetOnEndpointSuccess(callback func(endpointName string)) {
-	p.onEndpointSuccess = callback
-}
-
 // Start starts the proxy server
 func (p *Proxy) Start() error {
 	return p.StartWithMux(nil)
@@ -144,7 +157,7 @@ func (p *Proxy) Start() error {
 
 // StartWithMux starts the proxy server with an optional custom mux
 func (p *Proxy) StartWithMux(customMux *http.ServeMux) error {
-	port := p.config.GetPort()
+	port := p.cfg().GetPort()
 	bindHost := resolveBindHost()
 
 	var mux *http.ServeMux
@@ -180,7 +193,7 @@ func (p *Proxy) StartWithMux(customMux *http.ServeMux) error {
 	} else {
 		logger.Warn("Osante Proxy starting on %s:%d — admin API is UNAUTHENTICATED, bind to 127.0.0.1 unless you know what you're doing", bindHost, port)
 	}
-	logger.Info("Configured %d endpoints", len(p.config.GetEndpoints()))
+	logger.Info("Configured %d endpoints", len(p.cfg().GetEndpoints()))
 
 	return p.server.ListenAndServe()
 }
@@ -224,7 +237,7 @@ func (p *Proxy) Stop() error {
 
 // getEnabledEndpoints returns only the enabled endpoints
 func (p *Proxy) getEnabledEndpoints() []config.Endpoint {
-	allEndpoints := p.config.GetEndpoints()
+	allEndpoints := p.cfg().GetEndpoints()
 	enabled := make([]config.Endpoint, 0)
 	for _, ep := range allEndpoints {
 		if ep.Enabled {
@@ -305,12 +318,6 @@ func (p *Proxy) hasActiveRequests(endpointName string) bool {
 	return p.activeRequests[endpointName] > 0
 }
 
-// isCurrentEndpoint checks if the given endpoint is still the current one
-func (p *Proxy) isCurrentEndpoint(endpointName string) bool {
-	current := p.getCurrentEndpoint()
-	return current.Name == endpointName
-}
-
 // getEndpointContext returns a context for the given endpoint, creating one if needed
 func (p *Proxy) getEndpointContext(endpointName string) context.Context {
 	p.ctxMu.Lock()
@@ -387,6 +394,10 @@ func (p *Proxy) GetCurrentEndpointName() string {
 // SetCurrentEndpoint manually switches to a specific endpoint by name
 // Returns error if endpoint not found or not enabled
 // Thread-safe and cancels ongoing requests on the old endpoint
+//
+// Lock order is mu → ctxMu (via cancelEndpointRequests). ctxMu is only ever
+// taken as a leaf (getEndpointContext / cancelEndpointRequests take nothing
+// else), so this cannot deadlock.
 func (p *Proxy) SetCurrentEndpoint(targetName string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -457,15 +468,6 @@ func (p *Proxy) earliestTokenCooldown(endpointName string, now time.Time) (time.
 	return p.storage.EarliestTokenCooldown(endpointName, now)
 }
 
-func (p *Proxy) markCredentialSuccess(credentialID int64) {
-	if credentialID <= 0 || p.storage == nil {
-		return
-	}
-	if err := p.storage.MarkCredentialSuccess(credentialID, time.Now().UTC()); err != nil {
-		logger.Warn("Failed to mark credential success (id=%d): %v", credentialID, err)
-	}
-}
-
 // TraceSnapshot returns a copy of the most recent request traces, newest
 // first. Used by the /api/trace admin endpoint. limit <= 0 returns all
 // records currently in the ring.
@@ -492,6 +494,18 @@ func (p *Proxy) recordCredentialUsage(credentialID int64, endpointName string, r
 	}
 	if err := p.storage.UpsertCredentialUsage(credentialID, endpointName, requests, errors, inputTokens, outputTokens, time.Now().UTC()); err != nil {
 		logger.Warn("Failed to record credential usage (id=%d): %v", credentialID, err)
+	}
+}
+
+// recordCredentialSuccess writes the usage counters and the "token works" reset
+// in a single transaction. Doing it as two separate calls meant two serialized
+// SQLite writes per successful request.
+func (p *Proxy) recordCredentialSuccess(credentialID int64, endpointName string, inputTokens, outputTokens int) {
+	if credentialID <= 0 || p.storage == nil {
+		return
+	}
+	if err := p.storage.RecordCredentialSuccess(credentialID, endpointName, inputTokens, outputTokens, time.Now().UTC()); err != nil {
+		logger.Warn("Failed to record credential success (id=%d): %v", credentialID, err)
 	}
 }
 

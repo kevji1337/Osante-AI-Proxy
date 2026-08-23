@@ -17,16 +17,6 @@ type EndpointResolver struct {
 	getEndpointsFunc func() []config.Endpoint
 }
 
-// NewEndpointResolver creates a resolver backed by a fixed endpoint slice.
-func NewEndpointResolver(endpoints []config.Endpoint) *EndpointResolver {
-	eps := endpoints
-	return &EndpointResolver{
-		getEndpointsFunc: func() []config.Endpoint {
-			return eps
-		},
-	}
-}
-
 // NewEndpointResolverWithFunc creates a resolver that fetches the endpoint
 // list dynamically through the provided callback (so config edits are picked
 // up immediately).
@@ -57,7 +47,7 @@ func (r *EndpointResolver) ResolveEndpoint(req *http.Request, bodyBytes []byte) 
 		Model string `json:"model"`
 	}
 	if len(bodyBytes) > 0 {
-		json.Unmarshal(bodyBytes, &streamReq)
+		_ = json.Unmarshal(bodyBytes, &streamReq)
 	}
 	modelName := strings.TrimSpace(streamReq.Model)
 
@@ -113,9 +103,7 @@ func (r *EndpointResolver) parseEndpointFromHeader(req *http.Request) string {
 //	@endpoint-name            → ("endpoint-name", "")
 func (r *EndpointResolver) parseEndpointFromModel(model string) (string, string) {
 	model = strings.TrimSpace(model)
-	if strings.HasPrefix(model, "@") {
-		model = model[1:]
-	}
+	model = strings.TrimPrefix(model, "@")
 
 	slashIndex := strings.Index(model, "/")
 	if slashIndex == -1 {
@@ -160,11 +148,13 @@ func (r *EndpointResolver) findEndpointByName(name string, endpoints []config.En
 	return nil
 }
 
+// endpointNameNormalizer strips the cosmetic characters compared away by
+// normalizeEndpointName. Package-level so it isn't rebuilt on every lookup.
+var endpointNameNormalizer = strings.NewReplacer(" ", "", "-", "", "_", "")
+
 // normalizeEndpointName lower-cases the input and strips spaces, dashes and
 // underscores, so cosmetic differences between user input and the stored
 // endpoint name don't trigger "endpoint not found" errors.
 func normalizeEndpointName(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	r := strings.NewReplacer(" ", "", "-", "", "_", "")
-	return r.Replace(s)
+	return endpointNameNormalizer.Replace(strings.ToLower(strings.TrimSpace(s)))
 }

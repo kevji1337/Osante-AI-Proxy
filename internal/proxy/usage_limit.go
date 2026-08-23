@@ -192,6 +192,16 @@ func (p *Proxy) EndpointRuntimeSnapshot() map[string]EndpointRuntime {
 	return out
 }
 
+// ForgetEndpointState drops the runtime state (cooldown, last error) recorded
+// for an endpoint. Call it when an endpoint is deleted: the map is keyed by name
+// and nothing else prunes it, so a deleted endpoint would keep showing up as a
+// ghost in EndpointRuntimeSnapshot, /health and the UI status badges.
+func (p *Proxy) ForgetEndpointState(name string) {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	delete(p.endpointStates, name)
+}
+
 // ClearAllCooldowns wipes endpoint-level cooldowns and error flags. Token
 // pool cooldowns persisted in SQLite are NOT touched here; use
 // ClearAllTokenCooldowns for those. Returns number of endpoints affected.

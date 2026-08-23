@@ -23,8 +23,8 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 // getConfig returns the full configuration
 func (h *Handler) getConfig(w http.ResponseWriter, r *http.Request) {
 	WriteSuccess(w, map[string]interface{}{
-		"port":     h.config.GetPort(),
-		"logLevel": h.config.GetLogLevel(),
+		"port":     h.cfg().GetPort(),
+		"logLevel": h.cfg().GetLogLevel(),
 	})
 }
 
@@ -42,17 +42,17 @@ func (h *Handler) updateConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Update port if provided
 	if req.Port > 0 {
-		h.config.UpdatePort(req.Port)
+		h.cfg().UpdatePort(req.Port)
 	}
 
 	// Update log level if provided
 	if req.LogLevel >= 0 {
-		h.config.UpdateLogLevel(req.LogLevel)
+		h.cfg().UpdateLogLevel(req.LogLevel)
 	}
 
 	// Save to storage
 	adapter := storage.NewConfigStorageAdapter(h.storage)
-	if err := h.config.SaveToStorage(adapter); err != nil {
+	if err := h.cfg().SaveToStorage(adapter); err != nil {
 		logger.Error("Failed to save config: %v", err)
 		WriteError(w, http.StatusInternalServerError, "Failed to save configuration")
 		return
@@ -68,11 +68,11 @@ func (h *Handler) handleConfigPort(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		WriteSuccess(w, map[string]interface{}{
-			"port":       h.config.GetPort(),
-			"portLocked": h.config.IsPortLocked(),
+			"port":       h.cfg().GetPort(),
+			"portLocked": h.cfg().IsPortLocked(),
 		})
 	case http.MethodPut:
-		if h.config.IsPortLocked() {
+		if h.cfg().IsPortLocked() {
 			WriteError(w, http.StatusForbidden, "Port is locked by CLI flag and cannot be changed")
 			return
 		}
@@ -91,11 +91,11 @@ func (h *Handler) handleConfigPort(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		h.config.UpdatePort(req.Port)
+		h.cfg().UpdatePort(req.Port)
 
 		// Save to storage
 		adapter := storage.NewConfigStorageAdapter(h.storage)
-		if err := h.config.SaveToStorage(adapter); err != nil {
+		if err := h.cfg().SaveToStorage(adapter); err != nil {
 			logger.Error("Failed to save config: %v", err)
 			WriteError(w, http.StatusInternalServerError, "Failed to save configuration")
 			return
@@ -115,7 +115,7 @@ func (h *Handler) handleConfigLogLevel(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		WriteSuccess(w, map[string]interface{}{
-			"logLevel": h.config.GetLogLevel(),
+			"logLevel": h.cfg().GetLogLevel(),
 		})
 	case http.MethodPut:
 		var req struct {
@@ -132,7 +132,7 @@ func (h *Handler) handleConfigLogLevel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		h.config.UpdateLogLevel(req.LogLevel)
+		h.cfg().UpdateLogLevel(req.LogLevel)
 
 		// Update logger level
 		logger.GetLogger().SetMinLevel(logger.LogLevel(req.LogLevel))
@@ -140,7 +140,7 @@ func (h *Handler) handleConfigLogLevel(w http.ResponseWriter, r *http.Request) {
 
 		// Save to storage
 		adapter := storage.NewConfigStorageAdapter(h.storage)
-		if err := h.config.SaveToStorage(adapter); err != nil {
+		if err := h.cfg().SaveToStorage(adapter); err != nil {
 			logger.Error("Failed to save config: %v", err)
 			WriteError(w, http.StatusInternalServerError, "Failed to save configuration")
 			return

@@ -47,7 +47,8 @@ func TestHandleStreamingResponseExtractsUsageFromOriginalEvent(t *testing.T) {
 		},
 	})
 
-	p := &Proxy{config: cfg}
+	p := &Proxy{}
+	p.config.Store(cfg)
 	endpoint := cfg.GetEndpoints()[0]
 	originalSSE := strings.Join([]string{
 		`data: {"type":"response.completed","response":{"usage":{"input_tokens":7,"output_tokens":5,"total_tokens":12}}}`,

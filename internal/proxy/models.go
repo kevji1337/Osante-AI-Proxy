@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +13,10 @@ import (
 	"github.com/kevji1337/Osante-AI-Proxy/internal/config"
 	"github.com/kevji1337/Osante-AI-Proxy/internal/logger"
 )
+
+// modelsFetchBudget bounds the whole /v1/models fan-out. Long enough for a slow
+// upstream, short enough that a hung endpoint cannot pin the request.
+const modelsFetchBudget = 15 * time.Second
 
 // ModelInfo represents a single model information
 type ModelInfo struct {
@@ -70,11 +76,38 @@ func (c *ModelsCache) Clear() {
 	c.updatedAt = time.Time{}
 }
 
+// modelsAPIKey resolves the key to authenticate a /v1/models probe with.
+//
+// Checking only AuthModeAPIKey meant this never authenticated in practice: this
+// build forces every endpoint to token_pool and ApplyEndpointAuthModeRules
+// clears Endpoint.APIKey for pools, so the probe went out unauthenticated, the
+// upstream answered 401, and the model list silently fell back to the built-in
+// defaults for every endpoint.
+func (p *Proxy) modelsAPIKey(ep config.Endpoint) string {
+	if ep.AuthMode == config.AuthModeAPIKey {
+		return strings.TrimSpace(ep.APIKey)
+	}
+	if !config.IsTokenPoolAuthMode(ep.AuthMode) {
+		return strings.TrimSpace(ep.APIKey)
+	}
+	cred, err := p.selectCredential(ep.Name)
+	if err != nil {
+		logger.Debug("Models probe: no usable token for %s: %v", ep.Name, err)
+		return ""
+	}
+	if cred == nil {
+		return ""
+	}
+	return strings.TrimSpace(cred.AccessToken)
+}
+
 // fetchModelsFromEndpoint fetches models from a specific endpoint
-func (p *Proxy) fetchModelsFromEndpoint(ep config.Endpoint) ([]ModelInfo, error) {
+func (p *Proxy) fetchModelsFromEndpoint(ctx context.Context, ep config.Endpoint) ([]ModelInfo, error) {
 	var modelsURL string
 	var req *http.Request
 	var err error
+
+	apiKey := p.modelsAPIKey(ep)
 
 	switch strings.ToLower(ep.Transformer) {
 	case "openai", "openai2":
@@ -90,8 +123,8 @@ func (p *Proxy) fetchModelsFromEndpoint(ep config.Endpoint) ([]ModelInfo, error)
 			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
 		// Add authorization header
-		if ep.AuthMode == config.AuthModeAPIKey && ep.APIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+ep.APIKey)
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 
 	case "gemini":
@@ -103,8 +136,8 @@ func (p *Proxy) fetchModelsFromEndpoint(ep config.Endpoint) ([]ModelInfo, error)
 			modelsURL = baseURL + "/v1beta/models"
 		}
 		// Add API key as query parameter
-		if ep.AuthMode == config.AuthModeAPIKey && ep.APIKey != "" {
-			modelsURL = modelsURL + "?key=" + ep.APIKey
+		if apiKey != "" {
+			modelsURL = modelsURL + "?key=" + url.QueryEscape(apiKey)
 		}
 		req, err = http.NewRequest("GET", modelsURL, nil)
 		if err != nil {
@@ -119,12 +152,16 @@ func (p *Proxy) fetchModelsFromEndpoint(ep config.Endpoint) ([]ModelInfo, error)
 	// Set User-Agent
 	req.Header.Set("User-Agent", "Osante Proxy/1.0")
 
+	// The shared client has no overall timeout (streaming), so the caller's
+	// context is what bounds this probe.
+	req = req.WithContext(ctx)
+
 	// Execute request
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch models: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
@@ -223,7 +260,7 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	// Check for refresh parameter
 	refresh := r.URL.Query().Get("refresh") == "true"
-	refreshEnabled := p.config.ModelsCacheRefreshEnabled
+	refreshEnabled := p.cfg().GetModelsCacheRefreshEnabled()
 
 	if refresh && !refreshEnabled {
 		writeProxyError(w, http.StatusForbidden, "permission_error", "Refresh is disabled in configuration")
@@ -238,34 +275,65 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Fetch from endpoints
-	endpoints := p.config.GetEndpoints()
+	// Serialize cache misses. Without this, every concurrent request that
+	// arrives on an expired cache probes every endpoint (cache stampede);
+	// whoever gets the lock second finds the freshly-filled cache instead.
+	p.modelsFetchMu.Lock()
+	defer p.modelsFetchMu.Unlock()
+	if !refresh {
+		if cached, ok := p.modelsCache.Get(); ok {
+			p.writeModelsResponse(w, cached)
+			return
+		}
+	}
+
+	// The shared HTTP client deliberately has no overall timeout (long SSE
+	// streams) and ResponseHeaderTimeout is 90s, so probing N endpoints
+	// sequentially could hold the client for 90*N seconds. Bound the whole fan-out
+	// and run the probes concurrently.
+	ctx, cancel := context.WithTimeout(r.Context(), modelsFetchBudget)
+	defer cancel()
+
+	var enabled []config.Endpoint
+	for _, ep := range p.cfg().GetEndpoints() {
+		if ep.Enabled {
+			enabled = append(enabled, ep)
+		}
+	}
+
+	perEndpoint := make([][]ModelInfo, len(enabled))
+	fetched := make([]bool, len(enabled))
+	var wg sync.WaitGroup
+	for i := range enabled {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ep := enabled[i]
+			models, err := p.fetchModelsFromEndpoint(ctx, ep)
+			if err != nil {
+				// If fetch fails, use default models for this endpoint
+				logger.Debug("Failed to fetch models from %s: %v", ep.Name, err)
+				perEndpoint[i] = p.getDefaultModels(ep)
+				return
+			}
+			perEndpoint[i] = models
+			fetched[i] = true
+		}(i)
+	}
+	wg.Wait()
+
+	// Aggregate in endpoint order so the list is stable across requests.
 	allModels := []ModelInfo{}
 	allFailed := true
-
-	for _, ep := range endpoints {
-		if !ep.Enabled {
-			continue
-		}
-
-		var models []ModelInfo
-		var err error
-
-		// Try to fetch from endpoint's /v1/models API
-		models, err = p.fetchModelsFromEndpoint(ep)
-		if err != nil {
-			// If fetch fails, use default models for this endpoint
-			logger.Debug("Failed to fetch models from %s: %v", ep.Name, err)
-			models = p.getDefaultModels(ep)
-		} else {
+	for i := range enabled {
+		if fetched[i] {
 			allFailed = false
 		}
-
-		allModels = append(allModels, models...)
+		allModels = append(allModels, perEndpoint[i]...)
 	}
 
 	// If all endpoints failed, still return the aggregated default models
-	if allFailed {
+	if allFailed && len(enabled) > 0 {
 		logger.Debug("All endpoints failed to fetch models, returning default models")
 	}
 
@@ -292,32 +360,4 @@ func (p *Proxy) writeModelsResponse(w http.ResponseWriter, models []ModelInfo) {
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		logger.Debug("Failed to encode models response: %v", err)
 	}
-}
-
-// refreshModelsCache refreshes the models cache in background
-func (p *Proxy) refreshModelsCache() {
-	logger.Debug("Refreshing models cache in background")
-
-	endpoints := p.config.GetEndpoints()
-	allModels := []ModelInfo{}
-
-	for _, ep := range endpoints {
-		if !ep.Enabled {
-			continue
-		}
-
-		var models []ModelInfo
-		var err error
-
-		models, err = p.fetchModelsFromEndpoint(ep)
-		if err != nil {
-			logger.Debug("Background refresh: failed to fetch models from %s: %v", ep.Name, err)
-			models = p.getDefaultModels(ep)
-		}
-
-		allModels = append(allModels, models...)
-	}
-
-	p.modelsCache.Set(allModels)
-	logger.Debug("Models cache refreshed, total models: %d", len(allModels))
 }

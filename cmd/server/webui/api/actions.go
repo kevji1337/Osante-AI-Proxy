@@ -31,8 +31,8 @@ func (h *Handler) handleClearCooldowns(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.Info("Admin action: cleared %d endpoint cooldowns + %d token cooldowns", epClearedCount, tokenCleared)
 	WriteSuccess(w, map[string]interface{}{
-		"endpoints_cleared":  epClearedCount,
-		"tokens_cleared":     tokenCleared,
+		"endpoints_cleared": epClearedCount,
+		"tokens_cleared":    tokenCleared,
 	})
 }
 
@@ -71,7 +71,7 @@ func (h *Handler) handleExportBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	endpoints := h.config.GetEndpoints()
+	endpoints := h.cfg().GetEndpoints()
 	// Strip the api_key field — backups shouldn't bleed secrets.
 	safeEndpoints := make([]map[string]interface{}, 0, len(endpoints))
 	for _, ep := range endpoints {
@@ -87,11 +87,11 @@ func (h *Handler) handleExportBackup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payload := map[string]interface{}{
-		"exported_at":     time.Now().UTC().Format(time.RFC3339),
-		"format_version":  1,
-		"port":            h.config.GetPort(),
-		"endpoints":       safeEndpoints,
-		"note":            "API keys and credential tokens are NOT included. Re-import endpoints manually after restore.",
+		"exported_at":    time.Now().UTC().Format(time.RFC3339),
+		"format_version": 1,
+		"port":           h.cfg().GetPort(),
+		"endpoints":      safeEndpoints,
+		"note":           "API keys and credential tokens are NOT included. Re-import endpoints manually after restore.",
 	}
 
 	filename := fmt.Sprintf("osante-backup-%s.json", time.Now().Format("2006-01-02-150405"))

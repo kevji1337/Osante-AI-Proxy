@@ -148,24 +148,24 @@ func (h *Handler) handleStatsTrends(w http.ResponseWriter, r *http.Request) {
 	trends := map[string]interface{}{
 		"todayVsYesterday": map[string]interface{}{
 			"requests": map[string]interface{}{
-				"today":     todayStats["totalRequests"],
-				"yesterday": yesterdayStats["totalRequests"],
-				"change":    calculatePercentChange(yesterdayStats["totalRequests"].(int), todayStats["totalRequests"].(int)),
+				"today":     todayStats.TotalRequests,
+				"yesterday": yesterdayStats.TotalRequests,
+				"change":    calculatePercentChange(yesterdayStats.TotalRequests, todayStats.TotalRequests),
 			},
 			"errors": map[string]interface{}{
-				"today":     todayStats["totalErrors"],
-				"yesterday": yesterdayStats["totalErrors"],
-				"change":    calculatePercentChange(yesterdayStats["totalErrors"].(int), todayStats["totalErrors"].(int)),
+				"today":     todayStats.TotalErrors,
+				"yesterday": yesterdayStats.TotalErrors,
+				"change":    calculatePercentChange(yesterdayStats.TotalErrors, todayStats.TotalErrors),
 			},
 			"inputTokens": map[string]interface{}{
-				"today":     todayStats["totalInputTokens"],
-				"yesterday": yesterdayStats["totalInputTokens"],
-				"change":    calculatePercentChange(int(yesterdayStats["totalInputTokens"].(int64)), int(todayStats["totalInputTokens"].(int64))),
+				"today":     todayStats.TotalInputTokens,
+				"yesterday": yesterdayStats.TotalInputTokens,
+				"change":    calculatePercentChange(int(yesterdayStats.TotalInputTokens), int(todayStats.TotalInputTokens)),
 			},
 			"outputTokens": map[string]interface{}{
-				"today":     todayStats["totalOutputTokens"],
-				"yesterday": yesterdayStats["totalOutputTokens"],
-				"change":    calculatePercentChange(int(yesterdayStats["totalOutputTokens"].(int64)), int(todayStats["totalOutputTokens"].(int64))),
+				"today":     todayStats.TotalOutputTokens,
+				"yesterday": yesterdayStats.TotalOutputTokens,
+				"change":    calculatePercentChange(int(yesterdayStats.TotalOutputTokens), int(todayStats.TotalOutputTokens)),
 			},
 		},
 	}
@@ -173,57 +173,56 @@ func (h *Handler) handleStatsTrends(w http.ResponseWriter, r *http.Request) {
 	WriteSuccess(w, trends)
 }
 
-// getStatsForPeriod retrieves statistics for a date range
-func (h *Handler) getStatsForPeriod(startDate, endDate string) (map[string]interface{}, error) {
-	allStats, err := h.storage.GetAllStats()
+// periodStats is the aggregate returned by getStatsForPeriod.
+//
+// It used to be a map[string]interface{}, which forced every consumer into
+// unchecked type assertions (`stats["totalRequests"].(int)`) that would panic on
+// the first shape change. The JSON field names are unchanged.
+type periodStats struct {
+	TotalRequests     int                       `json:"totalRequests"`
+	TotalErrors       int                       `json:"totalErrors"`
+	TotalSuccess      int                       `json:"totalSuccess"`
+	TotalInputTokens  int64                     `json:"totalInputTokens"`
+	TotalOutputTokens int64                     `json:"totalOutputTokens"`
+	Endpoints         map[string]periodEndpoint `json:"endpoints"`
+}
+
+type periodEndpoint struct {
+	Requests     int   `json:"requests"`
+	Errors       int   `json:"errors"`
+	InputTokens  int64 `json:"inputTokens"`
+	OutputTokens int64 `json:"outputTokens"`
+}
+
+// getStatsForPeriod retrieves statistics for a date range.
+//
+// Aggregation happens in SQL: the previous implementation pulled the entire
+// daily_stats table via GetAllStats() and filtered by date in Go, which is a
+// full scan plus GROUP BY for what is already an indexed range query.
+func (h *Handler) getStatsForPeriod(startDate, endDate string) (periodStats, error) {
+	aggregated, err := h.storage.GetPeriodStatsAggregated(startDate, endDate)
 	if err != nil {
-		return nil, err
+		return periodStats{}, err
 	}
 
-	totalRequests := 0
-	totalErrors := 0
-	var totalInputTokens int64 = 0
-	var totalOutputTokens int64 = 0
-	endpointStats := make(map[string]interface{})
-
-	for endpointName, stats := range allStats {
-		epRequests := 0
-		epErrors := 0
-		var epInputTokens int64 = 0
-		var epOutputTokens int64 = 0
-
-		for _, stat := range stats {
-			if stat.Date >= startDate && stat.Date <= endDate {
-				epRequests += stat.Requests
-				epErrors += stat.Errors
-				epInputTokens += int64(stat.InputTokens)
-				epOutputTokens += int64(stat.OutputTokens)
-			}
+	out := periodStats{Endpoints: make(map[string]periodEndpoint, len(aggregated))}
+	for endpointName, st := range aggregated {
+		if st == nil || st.Requests <= 0 {
+			continue
 		}
-
-		if epRequests > 0 {
-			endpointStats[endpointName] = map[string]interface{}{
-				"requests":     epRequests,
-				"errors":       epErrors,
-				"inputTokens":  epInputTokens,
-				"outputTokens": epOutputTokens,
-			}
-
-			totalRequests += epRequests
-			totalErrors += epErrors
-			totalInputTokens += epInputTokens
-			totalOutputTokens += epOutputTokens
+		out.Endpoints[endpointName] = periodEndpoint{
+			Requests:     st.Requests,
+			Errors:       st.Errors,
+			InputTokens:  st.InputTokens,
+			OutputTokens: st.OutputTokens,
 		}
+		out.TotalRequests += st.Requests
+		out.TotalErrors += st.Errors
+		out.TotalInputTokens += st.InputTokens
+		out.TotalOutputTokens += st.OutputTokens
 	}
-
-	return map[string]interface{}{
-		"totalRequests":     totalRequests,
-		"totalErrors":       totalErrors,
-		"totalSuccess":      totalRequests - totalErrors,
-		"totalInputTokens":  totalInputTokens,
-		"totalOutputTokens": totalOutputTokens,
-		"endpoints":         endpointStats,
-	}, nil
+	out.TotalSuccess = out.TotalRequests - out.TotalErrors
+	return out, nil
 }
 
 // calculatePercentChange calculates the percentage change between two values

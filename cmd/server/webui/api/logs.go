@@ -75,7 +75,7 @@ func (h *Handler) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 	defer logger.GetLogger().Unsubscribe(subID)
 
 	// Send a hello so the client knows the connection is live.
-	fmt.Fprint(w, ": connected\n\n")
+	_, _ = fmt.Fprint(w, ": connected\n\n")
 	flusher.Flush()
 
 	ctx := r.Context()
@@ -95,7 +95,7 @@ func (h *Handler) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			// SSE format: `data: <json>\n\n`. No event type so client onmessage fires.
-			fmt.Fprintf(w, "data: %s\n\n", data)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
 		}
 	}

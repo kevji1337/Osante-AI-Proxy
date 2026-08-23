@@ -80,7 +80,7 @@ func (p *Proxy) refreshCredential(endpoint config.Endpoint, credential *storage.
 	if err != nil {
 		return nil, fmt.Errorf("refresh request failed (%s): %w", codexOAuthTokenURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -165,12 +165,12 @@ func (p *Proxy) codexRefreshHTTPClient() *http.Client {
 	if p != nil && p.httpClient != nil {
 		client.Transport = p.httpClient.Transport
 	}
-	if p == nil || p.config == nil {
+	if p == nil || p.cfg() == nil {
 		return client
 	}
 
-	proxyCfg := p.config.GetProxy()
-	codexProxyCfg := p.config.GetCodexProxy()
+	proxyCfg := p.cfg().GetProxy()
+	codexProxyCfg := p.cfg().GetCodexProxy()
 	proxyURL := ""
 	if codexProxyCfg != nil && strings.TrimSpace(codexProxyCfg.URL) != "" {
 		proxyURL = codexProxyCfg.URL
@@ -180,12 +180,14 @@ func (p *Proxy) codexRefreshHTTPClient() *http.Client {
 	if strings.TrimSpace(proxyURL) == "" {
 		return client
 	}
-	transport, err := CreateProxyTransport(proxyURL)
+	// Reuse the cached per-proxy transport rather than building one per call;
+	// every fresh Transport carries its own idle-connection pool.
+	cached, err := proxyClientFor(proxyURL, client.Timeout)
 	if err != nil {
 		logger.Warn("Failed to create proxy transport for credential refresh: %v", err)
 		return client
 	}
-	client.Transport = transport
+	client.Transport = cached.Transport
 	logger.Debug("Using proxy for credential refresh: %s", proxyURL)
 	return client
 }
@@ -230,5 +232,5 @@ func truncateForLog(message string, max int) string {
 	if max <= 0 || len(message) <= max {
 		return message
 	}
-	return message[:max] + "..."
+	return truncateString(message, max)
 }
