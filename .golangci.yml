@@ -15,19 +15,19 @@ linters:
   enable:
     - bodyclose # http.Response.Body must be closed
     - errcheck # missing error checks
+    - errorlint # %w / errors.Is / errors.As misuse
     - govet # standard go vet checks
     - ineffassign # unused assignments
     - misspell # spelling
+    - nilerr # returning nil after a non-nil error
     - nolintlint # malformed //nolint directives
     - staticcheck # subsumes many older linters
+    - unconvert # redundant type conversions
     - unused # unused symbols
-    # Next pass, one at a time (each currently has a backlog):
-    #   errorlint  - %w / errors.Is / errors.As misuse (6 findings)
-    #   nilerr     - returning nil after a non-nil error (13 findings)
-    #   unconvert  - redundant type conversions
-    #   noctx      - flags every http.NewRequest without a context; this code
-    #                attaches the context later via req.WithContext, so it is
-    #                mostly false positives here (67 findings)
+    # Deliberately off: noctx flags every http.NewRequest without a context (67
+    # findings). This code attaches the context afterwards via req.WithContext,
+    # often from the endpoint rather than the client request, so enabling it would
+    # mean a real refactor of the request pipeline rather than a mechanical fix.
 
   settings:
     misspell:

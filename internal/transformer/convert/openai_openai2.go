@@ -396,7 +396,7 @@ func OpenAIStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 
 	var chunk transformer.OpenAIStreamChunk
 	if err := json.Unmarshal([]byte(jsonData), &chunk); err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("upstream sent an SSE event that is not valid JSON: %w", err)
 	}
 
 	var result strings.Builder
@@ -505,7 +505,7 @@ func OpenAI2StreamToOpenAI(event []byte, ctx *transformer.StreamContext, model s
 
 	var evt transformer.OpenAI2StreamEvent
 	if err := json.Unmarshal([]byte(jsonData), &evt); err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("upstream sent an SSE event that is not valid JSON: %w", err)
 	}
 
 	switch evt.Type {

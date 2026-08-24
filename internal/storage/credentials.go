@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -205,7 +206,7 @@ func (s *SQLiteStorage) GetCredentialByID(id int64) (*EndpointCredential, error)
 	`, id)
 
 	cred, err := scanCredential(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

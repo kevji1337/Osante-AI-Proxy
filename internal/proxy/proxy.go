@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -228,7 +229,10 @@ func (p *Proxy) Stop() error {
 		// deadline. Close() the server to force-tear remaining connections.
 		closeErr := p.server.Close()
 		if closeErr != nil {
-			return fmt.Errorf("graceful shutdown failed: %w; close also failed: %v", err, closeErr)
+			// errors.Join keeps both in the chain, so errors.Is works against
+			// either of them; a %v on the second would flatten it to text.
+			return fmt.Errorf("graceful shutdown failed, and closing the server also failed: %w",
+				errors.Join(err, closeErr))
 		}
 		return err
 	}

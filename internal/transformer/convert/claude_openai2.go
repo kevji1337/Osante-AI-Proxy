@@ -318,7 +318,7 @@ func ClaudeStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 
 	var data map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonData), &data); err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("upstream sent an SSE event that is not valid JSON: %w", err)
 	}
 
 	// Check for error response
@@ -514,7 +514,7 @@ func OpenAI2StreamToClaude(event []byte, ctx *transformer.StreamContext) ([]byte
 
 	var evt transformer.OpenAI2StreamEvent
 	if err := json.Unmarshal([]byte(jsonData), &evt); err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("upstream sent an SSE event that is not valid JSON: %w", err)
 	}
 
 	var result []byte

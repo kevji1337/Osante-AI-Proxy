@@ -115,37 +115,3 @@ type EndpointStats struct {
 	InputTokens  int64
 	OutputTokens int64
 }
-
-type Storage interface {
-	// Endpoints
-	GetEndpoints() ([]Endpoint, error)
-	SaveEndpoint(ep *Endpoint) error
-	UpdateEndpoint(ep *Endpoint) error
-	DeleteEndpoint(name string) error
-	GetEndpointCredentials(endpointName string) ([]EndpointCredential, error)
-	GetCredentialByID(id int64) (*EndpointCredential, error)
-	SaveEndpointCredential(cred *EndpointCredential) error
-	UpdateEndpointCredential(cred *EndpointCredential) error
-	DeleteEndpointCredential(endpointName string, id int64) error
-	GetTokenPoolStats(endpointName string) (TokenPoolStats, error)
-	GetAllTokenPoolStats() (map[string]TokenPoolStats, error)
-	GetCredentialRateLimitsByEndpoint(endpointName string) (map[int64]*CredentialRateLimits, error)
-	GetCredentialRateLimits(credentialID int64) (*CredentialRateLimits, error)
-	UpsertCredentialRateLimits(credentialID int64, data *CodexRateLimitsData, status, errMsg string, updatedAt time.Time) error
-	GetCredentialUsageByEndpoint(endpointName string) (map[int64]*CredentialUsage, error)
-	UpsertCredentialUsage(credentialID int64, endpointName string, requestsDelta, errorsDelta, inputTokensDelta, outputTokensDelta int, updatedAt time.Time) error
-
-	// Stats
-	RecordDailyStat(stat *DailyStat) error
-	GetDailyStats(endpointName, startDate, endDate string) ([]DailyStat, error)
-	GetTotalStats() (int, map[string]*EndpointStats, error)
-	GetEndpointTotalStats(endpointName string) (*EndpointStats, error)
-	GetPeriodStatsAggregated(startDate, endDate string) (map[string]*EndpointStats, error)
-
-	// Config
-	GetConfig(key string) (string, error)
-	SetConfig(key, value string) error
-
-	// Close
-	Close() error
-}

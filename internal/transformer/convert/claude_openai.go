@@ -2,6 +2,7 @@ package convert
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/kevji1337/Osante-AI-Proxy/internal/transformer"
@@ -376,7 +377,7 @@ func ClaudeStreamToOpenAI(event []byte, ctx *transformer.StreamContext, model st
 
 	var data map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonData), &data); err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("upstream sent an SSE event that is not valid JSON: %w", err)
 	}
 
 	switch eventType {
@@ -477,7 +478,7 @@ func OpenAIStreamToClaude(event []byte, ctx *transformer.StreamContext) ([]byte,
 
 	var chunk transformer.OpenAIStreamChunk
 	if err := json.Unmarshal([]byte(jsonData), &chunk); err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("upstream sent an SSE event that is not valid JSON: %w", err)
 	}
 
 	var result []byte

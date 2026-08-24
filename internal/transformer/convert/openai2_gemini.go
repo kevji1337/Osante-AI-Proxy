@@ -185,7 +185,7 @@ func GeminiStreamToOpenAI2(event []byte, ctx *transformer.StreamContext) ([]byte
 
 	var resp transformer.GeminiResponse
 	if err := json.Unmarshal([]byte(jsonData), &resp); err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("upstream sent an SSE event that is not valid JSON: %w", err)
 	}
 
 	// Sync Gemini usage metadata to context
@@ -280,7 +280,7 @@ func OpenAI2StreamToGemini(event []byte, ctx *transformer.StreamContext) ([]byte
 
 	var evt transformer.OpenAI2StreamEvent
 	if err := json.Unmarshal([]byte(jsonData), &evt); err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("upstream sent an SSE event that is not valid JSON: %w", err)
 	}
 
 	switch evt.Type {

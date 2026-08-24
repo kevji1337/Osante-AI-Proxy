@@ -436,6 +436,12 @@ func sendRequest(ctx context.Context, proxyReq *http.Request, httpClient *http.C
 // call, and the sockets plus their readLoop/writeLoop goroutines piled up until
 // IdleConnTimeout (90s). One Transport per distinct proxy URL is both correct and
 // what net/http expects.
+// maxCachedProxyClients bounds the cache. In practice one or two proxy URLs are
+// ever in play; the cap only matters because the key is user-editable config, so
+// repeatedly changing the proxy in the UI would otherwise accumulate Transports —
+// each holding its own idle connections — for the lifetime of the process.
+const maxCachedProxyClients = 8
+
 var (
 	proxyClientsMu sync.Mutex
 	proxyClients   = map[string]*http.Client{}
@@ -452,9 +458,32 @@ func proxyClientFor(proxyURL string, timeout time.Duration) (*http.Client, error
 	if err != nil {
 		return nil, err
 	}
+
+	if len(proxyClients) >= maxCachedProxyClients {
+		// Drop everything rather than track an eviction order: entries are
+		// interchangeable, and a full reset costs one handshake per proxy still
+		// in use. CloseIdleConnections is the point — without it the sockets
+		// linger until IdleConnTimeout with nothing referencing them.
+		evictProxyClientsLocked()
+	}
+
 	c := &http.Client{Transport: transport, Timeout: timeout}
 	proxyClients[proxyURL] = c
 	return c, nil
+}
+
+// evictProxyClientsLocked empties the cache, closing idle connections first.
+// Callers must hold proxyClientsMu. In-flight requests keep working: they hold
+// their own reference to the client, and CloseIdleConnections only touches
+// connections that are not in use.
+func evictProxyClientsLocked() {
+	for key, client := range proxyClients {
+		if t, ok := client.Transport.(*http.Transport); ok {
+			t.CloseIdleConnections()
+		}
+		delete(proxyClients, key)
+	}
+	logger.Debug("Proxy client cache reached %d entries, cleared it", maxCachedProxyClients)
 }
 
 func resolveProxyURLForRequest(cfg *config.Config, targetURL *url.URL) string {

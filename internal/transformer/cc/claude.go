@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/kevji1337/Osante-AI-Proxy/internal/transformer"
@@ -34,13 +35,30 @@ func (t *ClaudeTransformer) TransformRequest(req []byte) ([]byte, error) {
 		return req, nil
 	}
 
+	// Claude-to-Claude needs no conversion; the only job here is stamping the
+	// endpoint's model override onto the body. Anything that is not a JSON object
+	// (health probes, count_tokens oddities, empty bodies) has no model field to
+	// stamp, so pass it through untouched rather than failing the request. Probing
+	// the shape first keeps that decision explicit instead of hiding it behind a
+	// discarded Unmarshal error.
+	if !isJSONObject(req) {
+		return req, nil
+	}
+
 	var data map[string]interface{}
 	if err := json.Unmarshal(req, &data); err != nil {
-		return req, nil
+		return nil, fmt.Errorf("claude request body is not valid JSON: %w", err)
 	}
 
 	data["model"] = t.model
 	return json.Marshal(data)
+}
+
+// isJSONObject reports whether body looks like a JSON object, i.e. whether it can
+// carry a "model" field at all.
+func isJSONObject(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
 func (t *ClaudeTransformer) TransformResponse(resp []byte, isStreaming bool) ([]byte, error) {
