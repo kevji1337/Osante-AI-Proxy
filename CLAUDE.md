@@ -97,6 +97,7 @@ Web admin / JSON API routes are under `/api/...` and `/ui/`.
 | `OSANTE_DATA_DIR`  | `~/.Osante`                   |
 | `OSANTE_DB_PATH`   | `$OSANTE_DATA_DIR/osante.db`  |
 | `OSANTE_LOG_LEVEL` | `1` (INFO)                    |
+| `OSANTE_DEBUG_FILE`| unset — path enables the verbose debug log (full request/response bodies) |
 
 The admin API and the web UI are unauthenticated — BasicAuth has been removed
 completely. The default `OSANTE_BIND=127.0.0.1` enforces loopback-only; set

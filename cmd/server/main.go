@@ -66,6 +66,8 @@ func main() {
 
 	applyEnvOverrides(cfg)
 	setLogLevels(cfg.GetLogLevel())
+	enableDebugFileFromEnv()
+	defer logger.GetLogger().Close()
 
 	if err := cfg.Validate(); err != nil {
 		logger.Error("Invalid configuration: %v", err)
@@ -194,6 +196,25 @@ func applyEnvOverrides(cfg *config.Config) {
 			logger.Warn("Invalid OSANTE_LOG_LEVEL value %q: %v", levelStr, err)
 		}
 	}
+}
+
+// enableDebugFileFromEnv wires up the debug sink from OSANTE_DEBUG_FILE.
+//
+// Without this, Logger.EnableDebugFile had no caller at all: every
+// logger.DebugLog in the tree was permanently a no-op, and the full
+// request/response bodies they carry — deliberately kept out of the WARN feed
+// because /api/logs is unauthenticated — were unreachable by any means.
+func enableDebugFileFromEnv() {
+	path := strings.TrimSpace(os.Getenv("OSANTE_DEBUG_FILE"))
+	if path == "" {
+		return
+	}
+	if err := logger.GetLogger().EnableDebugFile(path); err != nil {
+		logger.Warn("Could not open debug log %s: %v (continuing without it)", path, err)
+		return
+	}
+	logger.Info("Debug log enabled: %s", path)
+	logger.Warn("The debug log records full request and response bodies (prompts, file contents, tool results). Delete it when you are done.")
 }
 
 func setLogLevels(level int) {

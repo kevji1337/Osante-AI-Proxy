@@ -26,6 +26,7 @@ if "%~1"=="" goto args_done
 if /i "%~1"=="--help"     goto usage
 if /i "%~1"=="-h"         goto usage
 if /i "%~1"=="--debug"    set "OSANTE_LOG_LEVEL=0" & shift & goto parse_args
+if /i "%~1"=="--debug-file" set "OSANTE_DEBUG_FILE=%~2" & shift & shift & goto parse_args
 if /i "%~1"=="--no-build" set "DO_BUILD=0"         & shift & goto parse_args
 if /i "%~1"=="--no-ui"    set "OPEN_UI=0"          & shift & goto parse_args
 if /i "%~1"=="--port"     set "PORT=%~2" & set "OSANTE_PORT=%~2" & shift & shift & goto parse_args
@@ -35,12 +36,14 @@ shift
 goto parse_args
 
 :usage
-echo Usage: start.bat [--debug] [--no-build] [--no-ui] [--port N] [-- server flags]
+echo Usage: start.bat [--debug] [--debug-file PATH] [--no-build] [--no-ui] [--port N]
 echo.
-echo   --debug      force OSANTE_LOG_LEVEL=0 (DEBUG) for this run
-echo   --no-build   run the existing binary without recompiling
-echo   --no-ui      do not open the web UI in a browser
-echo   --port N     override the configured port (sets OSANTE_PORT)
+echo   --debug           force OSANTE_LOG_LEVEL=0 (DEBUG) for this run
+echo   --debug-file PATH record full request/response bodies to PATH
+echo                     (prompts, file contents, tool results - delete it after)
+echo   --no-build        run the existing binary without recompiling
+echo   --no-ui           do not open the web UI in a browser
+echo   --port N          override the configured port (sets OSANTE_PORT)
 echo.
 echo Without --port / --debug the port and log level saved in the database
 echo (Settings in the web UI) are used.
@@ -164,6 +167,7 @@ echo  * API Base:    http://127.0.0.1:%PORT%/v1
 echo  * Storage:     %USERPROFILE%\.Osante\osante.db
 if defined OSANTE_LOG_LEVEL echo  * Log Level:   %OSANTE_LOG_LEVEL% ^(overriding the saved setting^)
 if not defined OSANTE_LOG_LEVEL echo  * Log Level:   from database ^(use --debug to force DEBUG^)
+if defined OSANTE_DEBUG_FILE echo  * Debug log:   %OSANTE_DEBUG_FILE% ^(records full request bodies^)
 echo ============================================================
 echo  Starting proxy server... (Press Ctrl+C to stop)
 echo ============================================================

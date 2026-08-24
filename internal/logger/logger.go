@@ -75,16 +75,27 @@ var (
 	once     sync.Once
 )
 
+// NewLogger builds an independent logger with the given ring-buffer capacity.
+//
+// The process uses the GetLogger singleton; this exists so tests can exercise the
+// logger without mutating global state.
+func NewLogger(maxSize int) *Logger {
+	if maxSize < 1 {
+		maxSize = 1000
+	}
+	return &Logger{
+		entries:      make([]LogEntry, 0),
+		maxSize:      maxSize,
+		minLevel:     DEBUG, // capture everything; the console filter is separate
+		consoleLevel: INFO,  // skip DEBUG on the console
+		subs:         make(map[int]chan LogEntry),
+	}
+}
+
 // GetLogger returns the singleton logger instance
 func GetLogger() *Logger {
 	once.Do(func() {
-		instance = &Logger{
-			entries:      make([]LogEntry, 0),
-			maxSize:      1000,  // Keep last 1000 logs
-			minLevel:     DEBUG, // Default to DEBUG level to capture all logs
-			consoleLevel: INFO,  // Default console level to INFO (skip DEBUG in console)
-			subs:         make(map[int]chan LogEntry),
-		}
+		instance = NewLogger(1000)
 	})
 	return instance
 }

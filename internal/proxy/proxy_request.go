@@ -783,7 +783,7 @@ func (p *Proxy) handleFinalStatus(w http.ResponseWriter, reqCtx *proxyRequestCon
 		// served by the unauthenticated /api/logs and /api/logs/stream, and users
 		// are asked to paste those logs into bug reports — so WARN carries only
 		// the size. Content goes to the debug log only.
-		logger.Warn("[%s] Outgoing payload was %d bytes (enable debug logging to inspect)", attempt.endpoint.Name, len(attempt.transformedBody))
+		logger.Warn("[%s] Outgoing payload was %d bytes (set OSANTE_DEBUG_FILE=<path> to record it)", attempt.endpoint.Name, len(attempt.transformedBody))
 		logger.DebugLog("[%s] Response %d: %s", attempt.endpoint.Name, resp.StatusCode, errMsg)
 		if logger.DebugEnabled() {
 			logger.DebugLog("[%s] Outgoing payload: %s", attempt.endpoint.Name, string(attempt.transformedBody))

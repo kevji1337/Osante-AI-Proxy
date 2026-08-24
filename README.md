@@ -147,6 +147,7 @@ The wire format was reverse-engineered from the official `duo` binary (see `gitl
 | `OSANTE_DATA_DIR`   | `~/.Osante`           | Data directory                    |
 | `OSANTE_DB_PATH`    | `$OSANTE_DATA_DIR/osante.db` | SQLite db path             |
 | `OSANTE_LOG_LEVEL`  | `1` (INFO)            | `0` DEBUG / `1` INFO / `2` WARN / `3` ERROR |
+| `OSANTE_DEBUG_FILE` | unset (off)           | Path to a verbose debug log. **Records full request and response bodies** — system prompts, message history, file contents, tool results. Off unless set; delete the file when done. |
 
 CLI `-port N` locks the port so it can't be changed via the API.
 
