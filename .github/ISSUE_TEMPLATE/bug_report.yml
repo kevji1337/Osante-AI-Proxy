@@ -57,6 +57,12 @@ body:
       description: |
         Paste relevant logs from the web UI's **Logs** tab or `GET /api/logs`.
         Please redact tokens / personal data.
+
+        These logs deliberately exclude request and response bodies. If the bug
+        needs them, reproduce it with `OSANTE_DEBUG_FILE=<path>` set (or
+        `start.bat --debug-file <path>`) — but note that file records **entire
+        conversations**: system prompts, message history, file contents and tool
+        results. Quote only the part that matters, and delete the file afterwards.
       render: shell
     validations:
       required: false
