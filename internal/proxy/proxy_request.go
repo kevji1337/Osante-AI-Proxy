@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +35,24 @@ type proxyRequestContext struct {
 	lastUpstreamBody            []byte
 	lastUpstreamHeader          http.Header
 	trace                       *TraceHandle
+}
+
+// clientContext returns the context of the inbound client request, or nil when
+// there is no request to attach to (constructed in tests).
+func (c *proxyRequestContext) clientContext() context.Context {
+	if c == nil || c.httpRequest == nil {
+		return nil
+	}
+	return c.httpRequest.Context()
+}
+
+// clientGone reports why the client is no longer waiting, or nil while it is.
+func (c *proxyRequestContext) clientGone() error {
+	ctx := c.clientContext()
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Err()
 }
 
 type endpointAttempt struct {
@@ -75,6 +94,14 @@ func (p *Proxy) handleProxyRequest(w http.ResponseWriter, r *http.Request) {
 	lastEndpointName := ""
 
 	for retry := 0; retry < maxRetries; retry++ {
+		// Bail out before spending another attempt on a request nobody is waiting
+		// for. Every retry costs upstream quota, and maxRetries can be a dozen.
+		if err := reqCtx.clientGone(); err != nil {
+			logger.Debug("Client went away after %d attempt(s), abandoning the request: %v", retry, err)
+			reqCtx.trace.SetError("client canceled")
+			return
+		}
+
 		endpoint := p.nextEndpointForRequest(reqCtx)
 		if endpoint.Name == "" {
 			if p.writeLastUpstreamError(w, reqCtx) {
@@ -392,15 +419,21 @@ func (p *Proxy) runEndpointAttempt(w http.ResponseWriter, reqCtx *proxyRequestCo
 	}
 
 	p.logUpstreamRequest(reqCtx, attempt)
+	// Canceled when the client hangs up as well as when the endpoint is switched;
+	// see requestContextFor. Without the client half, an abandoned request kept
+	// burning upstream quota through the whole retry loop.
+	attemptCtx, releaseCtx := p.requestContextFor(reqCtx.clientContext(), attempt.endpoint.Name)
+	defer releaseCtx()
+
 	// bodyclose cannot follow the response through attempt.response into
 	// handleAttemptResponse. Every branch there consumes it: readResponseBody,
 	// handleNonStreamingResponse and handleStreamingResponse each close the body
 	// (the first two via defer), and the streaming aggregator does the same.
 	//nolint:bodyclose // closed by handleAttemptResponse on every path
-	resp, err := sendRequest(p.getEndpointContext(attempt.endpoint.Name), attempt.proxyRequest, p.httpClient, p.cfg())
+	resp, err := sendRequest(attemptCtx, attempt.proxyRequest, p.httpClient, p.cfg())
 	if err != nil {
 		reqCtx.trace.SetError(err.Error())
-		return p.handleSendError(err, attempt)
+		return p.handleSendError(reqCtx, err, attempt)
 	}
 	reqCtx.trace.Mark(PhaseUpstreamSent)
 	reqCtx.trace.SetStatus(resp.StatusCode)
@@ -548,8 +581,18 @@ func (p *Proxy) logUpstreamRequest(reqCtx *proxyRequestContext, attempt *endpoin
 	logger.Debug("[%s] %s %s %d %s", attempt.endpoint.Name, action, attempt.modelName, reqCtx.requestBytes, proxyLabel)
 }
 
-func (p *Proxy) handleSendError(err error, attempt *endpointAttempt) attemptResult {
+func (p *Proxy) handleSendError(reqCtx *proxyRequestContext, err error, attempt *endpointAttempt) attemptResult {
 	p.markRequestInactive(attempt.endpoint.Name)
+
+	// A client that hung up cancels the attempt context, which surfaces here as a
+	// request error. It is not the endpoint's fault: recording it would put a
+	// healthy endpoint into the error state and mark its token as failing, purely
+	// because the user pressed Esc. The retry loop stops on its own next iteration.
+	if clientErr := reqCtx.clientGone(); clientErr != nil {
+		logger.Debug("[%s] Request abandoned by the client: %v", attempt.endpoint.Name, clientErr)
+		return attemptResultRetryNextEndpoint
+	}
+
 	if isTransientNetworkError(err) {
 		// Transient: a single WARN explains what happened and that we're
 		// retrying. Logging an ERROR on top of that for the same event

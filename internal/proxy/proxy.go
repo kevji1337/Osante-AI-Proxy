@@ -337,6 +337,36 @@ func (p *Proxy) getEndpointContext(endpointName string) context.Context {
 	return ctx
 }
 
+// requestContextFor returns the context an upstream attempt should run under: it
+// is canceled when the client goes away AND when the endpoint is canceled
+// (manual switch or rotation).
+//
+// The endpoint context alone was not enough. It descends from
+// context.Background(), so a client that hung up — Esc in Claude Code, a closed
+// terminal — did not stop anything: the retry loop kept walking endpoints and
+// tokens, spending real quota on a reply nobody would read. With
+// computeMaxRetries reaching len(endpoints)*2 + (usable tokens - 1) per pool,
+// that is a dozen upstream calls at up to ResponseHeaderTimeout each.
+//
+// The returned cancel func must be called when the attempt finishes, or the
+// AfterFunc registration leaks until the endpoint context is canceled.
+func (p *Proxy) requestContextFor(clientCtx context.Context, endpointName string) (context.Context, context.CancelFunc) {
+	endpointCtx := p.getEndpointContext(endpointName)
+	if clientCtx == nil {
+		return endpointCtx, func() {}
+	}
+
+	ctx, cancel := context.WithCancel(clientCtx)
+	// Propagate endpoint-level cancellation into this attempt. stop() removes the
+	// registration so a long-lived endpoint context does not accumulate one entry
+	// per request.
+	stop := context.AfterFunc(endpointCtx, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+	}
+}
+
 // cancelEndpointRequests cancels all requests for the given endpoint
 func (p *Proxy) cancelEndpointRequests(endpointName string) {
 	p.ctxMu.Lock()
