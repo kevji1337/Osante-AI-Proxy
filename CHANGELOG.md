@@ -48,6 +48,12 @@ lines of unreachable code. Everything below is verified by tests or a live run.
 - **An upstream 200 whose body could not be transformed was returned to the
   client as HTTP 200 with an empty body** — a silent success, with no failover and
   no recorded error. It now fails over to the next endpoint.
+- **A client that hung up did not stop anything.** Attempts ran under a context
+  derived from `context.Background()`, so pressing Esc in Claude Code left the
+  retry loop walking endpoints and rotating tokens — up to
+  `len(endpoints)*2 + (usable tokens - 1)` upstream calls at 90s each, spending
+  real quota on a reply nobody would read. A cancelled request also no longer
+  marks the endpoint and its token as failing.
 - The endpoint resolver kept answering from a pre-`UpdateConfig` snapshot, so an
   endpoint added or renamed through the admin API was unaddressable via
   `X-CCN-Endpoint` / `?endpoint=` / `@endpoint` prefixes until restart.
@@ -109,6 +115,8 @@ lines of unreachable code. Everything below is verified by tests or a live run.
 - The reflection layer behind `StatsStorage` (seven `FieldByName` lookups per
   recorded stat, twice per request) and `storage.Storage`, a ~30-method interface
   with no implementations.
+- `internal/transformer/tool_chain.go` — 155 lines making their own recursive HTTP
+  calls with no context and no caller.
 
 ### Internal
 
@@ -119,6 +127,12 @@ lines of unreachable code. Everything below is verified by tests or a live run.
   `internal/config` 0 → 55%, `internal/logger` 0 → 85%, `internal/tokencount`
   0 → 65%, `cx/chat` and `cx/responses` 0 → 64%.
 - The proxy-client cache is bounded, closing idle connections when it clears.
+- The admin API's Test and Fetch Models calls carry the browser request's context,
+  so closing the tab stops the probe instead of leaving it to time out.
+- More coverage on the paths this pass touched: the 402 failover branches (token
+  cooldown vs endpoint cooldown), the retry budget, and the endpoint/credential
+  admin handlers — `internal/proxy` 21.5% → 35.1%, `cmd/server/webui/api`
+  12.5% → 31.7%.
 
 ## [0.1.0] — 2026-06-17
 
