@@ -438,20 +438,26 @@ func (p *Proxy) prepareEndpointAttempt(reqCtx *proxyRequestContext, attempt *end
 		logger.DebugLog("[%s] Transformed Request: %s", attempt.endpoint.Name, string(transformedBody))
 	}
 
+	// One decode/encode pass for every rewrite this attempt needs. Doing them as
+	// separate calls meant the body was parsed and re-serialized up to three times
+	// per attempt. The model override applied last wins, which is why the
+	// per-attempt model takes precedence over the client's prefix override.
+	rewrite := payloadRewrite{CleanToolCalls: true}
 	if reqCtx.modelOverride != "" {
-		transformedBody = overrideModelInPayload(transformedBody, reqCtx.modelOverride)
-		logger.DebugLog("[%s] request after model override: %s", attempt.endpoint.Name, string(transformedBody))
-	}
-
-	cleanedBody, err := cleanIncompleteToolCalls(transformedBody)
-	if err != nil {
-		// Non-messages payloads (count_tokens, /models, empty probes) fail this
-		// routinely — keep it at DEBUG so real warnings stay visible.
-		logger.Debug("[%s] Skipping tool-call cleanup: %v", attempt.endpoint.Name, err)
-		cleanedBody = transformedBody
+		rewrite.Model = reqCtx.modelOverride
 	}
 	if shouldOverridePayloadModel(attempt.transformerName) && attempt.modelName != "" {
-		cleanedBody = overrideModelInPayload(cleanedBody, attempt.modelName)
+		rewrite.Model = attempt.modelName
+	}
+	cleanedBody, err := rewriteRequestPayload(transformedBody, rewrite)
+	if err != nil {
+		// Non-messages payloads (count_tokens, /models, empty probes) hit this
+		// routinely — keep it at DEBUG so real warnings stay visible.
+		logger.Debug("[%s] Skipping payload rewrite: %v", attempt.endpoint.Name, err)
+		cleanedBody = transformedBody
+	}
+	if logger.DebugEnabled() && !bytes.Equal(cleanedBody, transformedBody) {
+		logger.DebugLog("[%s] request after rewrite: %s", attempt.endpoint.Name, string(cleanedBody))
 	}
 	attempt.transformedBody = cleanedBody
 	attempt.thinkingEnabled = detectThinkingEnabled(attempt.transformerName, attempt.transformedBody)

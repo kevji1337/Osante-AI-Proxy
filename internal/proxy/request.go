@@ -368,45 +368,22 @@ func isCodexBackendBaseURL(baseURL string) bool {
 	return strings.HasSuffix(cleanPath, "/backend-api/codex")
 }
 
+// ensureCodexResponsesPayload adds the fields the codex backend requires on
+// /v1/responses. Thin wrapper over rewriteRequestPayload; see payload.go.
 func ensureCodexResponsesPayload(payload []byte) []byte {
-	trimmed := strings.TrimSpace(string(payload))
-	if trimmed == "" || strings.HasPrefix(trimmed, "[") {
-		return payload
-	}
-
-	var body map[string]interface{}
-	if err := json.Unmarshal(payload, &body); err != nil {
-		return payload
-	}
-	body["store"] = false
-	body["stream"] = true
-	if _, ok := body["instructions"]; !ok {
-		body["instructions"] = ""
-	}
-	updated, err := json.Marshal(body)
+	updated, err := rewriteRequestPayload(payload, payloadRewrite{CodexResponses: true})
 	if err != nil {
-		return payload
+		logger.Debug("Skipping codex payload fixup: %v", err)
 	}
 	return updated
 }
 
+// overrideModelInPayload replaces the top-level model field. Thin wrapper over
+// rewriteRequestPayload; see payload.go.
 func overrideModelInPayload(payload []byte, model string) []byte {
-	if strings.TrimSpace(model) == "" {
-		return payload
-	}
-	trimmed := strings.TrimSpace(string(payload))
-	if trimmed == "" || strings.HasPrefix(trimmed, "[") {
-		return payload
-	}
-
-	var body map[string]interface{}
-	if err := json.Unmarshal(payload, &body); err != nil {
-		return payload
-	}
-	body["model"] = model
-	updated, err := json.Marshal(body)
+	updated, err := rewriteRequestPayload(payload, payloadRewrite{Model: model})
 	if err != nil {
-		return payload
+		logger.Debug("Skipping model override: %v", err)
 	}
 	return updated
 }
