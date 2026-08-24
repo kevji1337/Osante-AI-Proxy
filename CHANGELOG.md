@@ -110,6 +110,16 @@ lines of unreachable code. Everything below is verified by tests or a live run.
   recorded stat, twice per request) and `storage.Storage`, a ~30-method interface
   with no implementations.
 
+### Internal
+
+- Integers above 2^53 in a request body were silently rounded: three separate
+  rewrites each decoded the body into `map[string]interface{}`, which turns every
+  number into a float64. They now run as one pass with `json.Decoder.UseNumber`.
+- Test coverage where the audit had changed code and there was none:
+  `internal/config` 0 → 55%, `internal/logger` 0 → 85%, `internal/tokencount`
+  0 → 65%, `cx/chat` and `cx/responses` 0 → 64%.
+- The proxy-client cache is bounded, closing idle connections when it clears.
+
 ## [0.1.0] — 2026-06-17
 
 The first tagged release of Osante Proxy. Headline feature: **GitLab Duo
