@@ -24,10 +24,12 @@ linters:
     - staticcheck # subsumes many older linters
     - unconvert # redundant type conversions
     - unused # unused symbols
-    # Deliberately off: noctx flags every http.NewRequest without a context (67
-    # findings). This code attaches the context afterwards via req.WithContext,
-    # often from the endpoint rather than the client request, so enabling it would
-    # mean a real refactor of the request pipeline rather than a mechanical fix.
+    # Deliberately off: noctx. Every remaining finding is a database/sql call in
+    # internal/storage, whose whole API is context-free by design (it is a local
+    # SQLite file behind a single-writer mutex, not a network service). Enabling it
+    # would mean threading a context through every storage method for no behaviour
+    # change. The HTTP half of noctx — which did matter — is fixed, so if the
+    # storage API ever grows contexts, turn this on in the same change.
 
   settings:
     misspell:

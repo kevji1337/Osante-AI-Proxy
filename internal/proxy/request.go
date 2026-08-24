@@ -201,7 +201,9 @@ func buildProxyRequest(r *http.Request, endpoint config.Endpoint, apiKey string,
 		targetURL += "?" + r.URL.RawQuery
 	}
 
-	proxyReq, err := http.NewRequest(r.Method, targetURL, bytes.NewReader(requestBody))
+	// The inbound request's context is a sane default; sendRequest replaces it
+	// with the merged client+endpoint context before the call goes out.
+	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(requestBody))
 	if err != nil {
 		return nil, err
 	}

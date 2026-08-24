@@ -71,7 +71,7 @@ func TestLocalOnlyMiddleware(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, "http://127.0.0.1:12710/api/endpoints", strings.NewReader("{}"))
+			req := httptest.NewRequestWithContext(t.Context(), tc.method, "http://127.0.0.1:12710/api/endpoints", strings.NewReader("{}"))
 			if tc.host != "" {
 				req.Host = tc.host
 			}

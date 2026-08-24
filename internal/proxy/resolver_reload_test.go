@@ -32,7 +32,7 @@ func TestResolverFollowsUpdateConfig(t *testing.T) {
 		t.Fatalf("UpdateConfig: %v", err)
 	}
 
-	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"claude-3-5-sonnet"}`))
+	req := httptest.NewRequestWithContext(t.Context(), "POST", "/v1/messages", strings.NewReader(`{"model":"claude-3-5-sonnet"}`))
 	req.Header.Set("X-CCN-Endpoint", "two")
 
 	ep, _, err := p.resolver.ResolveEndpoint(req, []byte(`{"model":"claude-3-5-sonnet"}`))

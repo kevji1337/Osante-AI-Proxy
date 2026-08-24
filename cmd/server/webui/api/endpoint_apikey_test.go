@@ -40,7 +40,7 @@ func poolTokens(t *testing.T, s *storage.SQLiteStorage, endpoint string) []strin
 
 func doJSON(t *testing.T, h *Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(method, "http://127.0.0.1:12710"+path, strings.NewReader(body))
+	req := httptest.NewRequestWithContext(t.Context(), method, "http://127.0.0.1:12710"+path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

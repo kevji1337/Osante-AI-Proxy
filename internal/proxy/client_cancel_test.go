@@ -43,7 +43,7 @@ func TestRetryLoopStopsWhenTheClientHangsUp(t *testing.T) {
 
 	body := `{"model":"claude-3-5-sonnet-20241022","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
 	ctx, cancel := context.WithCancel(context.Background())
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body)).WithContext(ctx)
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -95,7 +95,7 @@ func TestClientCancellationIsNotBlamedOnTheEndpoint(t *testing.T) {
 
 	body := `{"model":"claude-3-5-sonnet-20241022","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
 	ctx, cancel := context.WithCancel(context.Background())
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body)).WithContext(ctx)
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	done := make(chan struct{})

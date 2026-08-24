@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,7 +45,7 @@ func (h *Handler) testEndpoint(w http.ResponseWriter, r *http.Request, name stri
 
 	// Test the endpoint
 	start := time.Now()
-	response, err := h.sendTestRequest(endpoint)
+	response, err := h.sendTestRequest(r.Context(), endpoint)
 	latency := time.Since(start).Milliseconds()
 
 	if err != nil {
@@ -64,18 +65,18 @@ func (h *Handler) testEndpoint(w http.ResponseWriter, r *http.Request, name stri
 }
 
 // sendTestRequest sends a test request to an endpoint
-func (h *Handler) sendTestRequest(endpoint *storage.Endpoint) (string, error) {
+func (h *Handler) sendTestRequest(ctx context.Context, endpoint *storage.Endpoint) (string, error) {
 	apiKey, authErr := h.resolveEndpointAPIKey(endpoint)
 	if authErr != nil {
 		return "", authErr
 	}
-	return h.sendTestRequestWithKey(endpoint, apiKey)
+	return h.sendTestRequestWithKey(ctx, endpoint, apiKey)
 }
 
 // sendTestRequestWithKey sends a test request to an endpoint using an explicit
 // API key. Used by the per-credential test action so the caller can target one
 // specific token from the pool instead of whichever the pool would rotate to.
-func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey string) (string, error) {
+func (h *Handler) sendTestRequestWithKey(ctx context.Context, endpoint *storage.Endpoint, apiKey string) (string, error) {
 	var reqBody []byte
 	var url string
 	var err error
@@ -181,7 +182,7 @@ func (h *Handler) sendTestRequestWithKey(endpoint *storage.Endpoint, apiKey stri
 		bodyReader = bytes.NewBuffer(reqBody)
 	}
 
-	req, err := http.NewRequest(method, url, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -359,7 +360,7 @@ func (h *Handler) testCredential(w http.ResponseWriter, r *http.Request, endpoin
 	}
 
 	start := time.Now()
-	response, testErr := h.sendTestRequestWithKey(endpoint, apiKey)
+	response, testErr := h.sendTestRequestWithKey(r.Context(), endpoint, apiKey)
 	latency := time.Since(start).Milliseconds()
 	if testErr != nil {
 		WriteJSON(w, http.StatusOK, map[string]interface{}{
@@ -414,7 +415,7 @@ func (h *Handler) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	models, err := h.fetchModelsFromProvider(req.APIUrl, req.APIKey, req.Transformer)
+	models, err := h.fetchModelsFromProvider(r.Context(), req.APIUrl, req.APIKey, req.Transformer)
 	if err != nil {
 		logger.Error("Failed to fetch models: %v", err)
 		WriteError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to fetch models: %v", err))
@@ -427,7 +428,7 @@ func (h *Handler) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // fetchModelsFromProvider fetches available models from a provider
-func (h *Handler) fetchModelsFromProvider(apiUrl, apiKey, transformer string) ([]string, error) {
+func (h *Handler) fetchModelsFromProvider(ctx context.Context, apiUrl, apiKey, transformer string) ([]string, error) {
 	var url string
 	var authHeader string
 
@@ -503,7 +504,7 @@ func (h *Handler) fetchModelsFromProvider(apiUrl, apiKey, transformer string) ([
 		return nil, fmt.Errorf("unsupported transformer: %s", transformer)
 	}
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
