@@ -113,6 +113,7 @@ class APIClient {
     // Quick actions
     async clearCooldowns()  { return this.request('POST', '/actions/clear-cooldowns'); }
     async flushStats()      { return this.request('POST', '/actions/flush-stats'); }
+    async shutdown()        { return this.request('POST', '/actions/shutdown'); }
     // Returns the download URL — the browser handles the file save itself.
     exportBackupURL() { return `${this.baseURL}/actions/export-backup`; }
 

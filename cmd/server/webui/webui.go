@@ -28,6 +28,13 @@ func New(cfg *config.Config, p *proxy.Proxy, storage *storage.SQLiteStorage) *We
 	}
 }
 
+// SetShutdownFunc lets the host expose POST /api/actions/shutdown. Without it that
+// endpoint reports itself unavailable, which is the right answer for a build that
+// has no way to stop itself.
+func (w *WebUI) SetShutdownFunc(fn func(reason string)) {
+	w.apiHandler.SetShutdownFunc(fn)
+}
+
 // RegisterRoutes registers all web UI routes to the provided mux.
 //
 // The admin API and the static UI are served without authentication (loopback,

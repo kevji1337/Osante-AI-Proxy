@@ -44,6 +44,18 @@ go build -ldflags="-s -w" -o osante-proxy .
 
 Requires Go **1.27+**.
 
+### Running without a console window (Windows)
+
+`start-background.bat` builds a GUI-subsystem binary (`osante-proxyw.exe`,
+`-H=windowsgui`) and starts it detached — no terminal, no window. Everything is
+managed from the web UI, including stopping the server: the dashboard has a
+**SHUT DOWN** button, and `start-background.bat --stop` does the same from a
+script.
+
+Because that process has no console, it has nowhere to print: read the log in the
+**Logs** tab or from `GET /api/logs`, and use `--debug-file <path>` when you need
+full request bodies.
+
 ### 2. Run
 
 ```bash

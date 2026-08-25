@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -86,9 +87,17 @@ func main() {
 	// Create HTTP mux
 	mux := http.NewServeMux()
 
+	// shutdownCh carries a stop request from the web UI. Buffered and guarded by
+	// sync.Once so repeated clicks cannot block the handler or double-close.
+	shutdownCh := make(chan string, 1)
+	var shutdownOnce sync.Once
+	requestShutdown := func(reason string) {
+		shutdownOnce.Do(func() { shutdownCh <- reason })
+	}
+
 	// Initialize and register Web UI (optional plugin)
 	// If webui package is not available, this will be skipped at compile time
-	if err := registerWebUI(mux, cfg, p, sqliteStorage); err != nil {
+	if err := registerWebUI(mux, cfg, p, sqliteStorage, requestShutdown); err != nil {
 		logger.Warn("Web UI not available: %v", err)
 	} else {
 		logger.Info("Web UI available at /ui/")
@@ -107,6 +116,11 @@ func main() {
 	select {
 	case sig := <-sigCh:
 		logger.Info("Received signal %s, shutting down", sig.String())
+		if err := p.Stop(); err != nil {
+			logger.Warn("Graceful shutdown failed: %v", err)
+		}
+	case reason := <-shutdownCh:
+		logger.Info("Shutting down (%s)", reason)
 		if err := p.Stop(); err != nil {
 			logger.Warn("Graceful shutdown failed: %v", err)
 		}

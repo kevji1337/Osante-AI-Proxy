@@ -102,3 +102,33 @@ func (h *Handler) handleExportBackup(w http.ResponseWriter, r *http.Request) {
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(payload)
 }
+
+// handleShutdown stops the server from the web UI.
+//
+// This is the counterpart to running without a console window: with no terminal
+// to Ctrl+C, the UI is the only way to stop the process. The handler answers
+// first and shuts down a moment later, so the browser sees a normal response
+// instead of a dropped connection.
+func (h *Handler) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		WriteError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	if h.requestShutdown == nil {
+		WriteError(w, http.StatusServiceUnavailable, "This build cannot shut itself down; stop the process instead")
+		return
+	}
+
+	logger.Warn("Admin action: shutdown requested from the web UI")
+	WriteSuccess(w, map[string]interface{}{
+		"message": "Shutting down",
+	})
+
+	// Let the response reach the browser before the listener goes away. The
+	// callback itself performs the graceful shutdown, so in-flight proxied
+	// requests still get their chance to finish.
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		h.requestShutdown("web UI request")
+	}()
+}

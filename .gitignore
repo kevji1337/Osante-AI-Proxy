@@ -45,4 +45,5 @@ IMPROVEMENTS.md
 
 # Compiled server binary (the .exe form is covered by *.exe above)
 /cmd/server/osante-proxy
+/cmd/server/osante-proxyw.exe
 

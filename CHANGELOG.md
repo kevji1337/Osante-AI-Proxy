@@ -105,6 +105,11 @@ lines of unreachable code. Everything below is verified by tests or a live run.
 - `OSANTE_DEBUG_FILE` — records full request and response bodies to a file.
   `Logger.EnableDebugFile` previously had no caller, so all 23 `DebugLog` sites
   were dead code.
+- **Console-less operation on Windows.** `start-background.bat` builds a
+  GUI-subsystem binary and starts it detached, so the proxy runs entirely behind
+  the web UI. `POST /api/actions/shutdown` and the dashboard's SHUT DOWN button
+  stop it, since there is no terminal to Ctrl+C; `start-background.bat --stop`
+  does the same from a script.
 
 ### Removed
 

@@ -22,6 +22,12 @@ type Handler struct {
 	config  atomic.Pointer[config.Config]
 	proxy   *proxy.Proxy
 	storage *storage.SQLiteStorage
+
+	// requestShutdown asks the process to exit. It exists so the server can be
+	// stopped from the web UI, which is the only interface available when it runs
+	// without a console window. nil when the host did not provide one, in which
+	// case the endpoint reports that it is unavailable rather than pretending.
+	requestShutdown func(reason string)
 }
 
 // NewHandler creates a new API handler
@@ -32,6 +38,11 @@ func NewHandler(cfg *config.Config, p *proxy.Proxy, s *storage.SQLiteStorage) *H
 	}
 	h.config.Store(cfg)
 	return h
+}
+
+// SetShutdownFunc installs the callback used by POST /api/actions/shutdown.
+func (h *Handler) SetShutdownFunc(fn func(reason string)) {
+	h.requestShutdown = fn
 }
 
 // cfg returns the configuration currently in effect. Never nil after NewHandler.
@@ -83,6 +94,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleTrace(w, r)
 	case "/api/actions/clear-cooldowns":
 		h.handleClearCooldowns(w, r)
+	case "/api/actions/shutdown":
+		h.handleShutdown(w, r)
 	case "/api/actions/flush-stats":
 		h.handleFlushStats(w, r)
 	case "/api/actions/export-backup":

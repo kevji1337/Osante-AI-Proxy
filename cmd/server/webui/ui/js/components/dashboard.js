@@ -88,6 +88,7 @@ class Dashboard {
                     <button class="btn btn-secondary btn-sm" id="qa-export-backup" title="Download endpoints + config as JSON (no secrets)">⤓ EXPORT BACKUP</button>
                     <button class="btn btn-secondary btn-sm" id="qa-open-inspector" title="Switch to live request inspector">▶ OPEN INSPECTOR</button>
                     <button class="btn btn-danger btn-sm" id="qa-flush-stats" title="Wipe daily_stats + credential_usage (irreversible)">✕ FLUSH STATS</button>
+                    <button class="btn btn-danger btn-sm" id="qa-shutdown" title="Stop the proxy server (needed when it runs without a console window)">⏻ SHUT DOWN</button>
                 </div>
 
                 <div id="stats-cards" class="grid grid-cols-4 mt-3">
@@ -164,6 +165,23 @@ class Dashboard {
         document.getElementById('qa-open-inspector').addEventListener('click', () => {
             // Lazy import the router to avoid a circular dep at module load.
             import('../router.js').then(({ router }) => router.navigate('inspector'));
+        });
+
+        document.getElementById('qa-shutdown').addEventListener('click', async () => {
+            // With --no-console there is no terminal to Ctrl+C, so this is the only
+            // way to stop the server. Confirm, because it kills the proxy every
+            // client is pointed at.
+            if (!confirm('SHUT DOWN
+
+This stops the proxy server. Clients pointed at it will fail until you start it again.
+
+Proceed?')) return;
+            try {
+                await api.shutdown();
+                notifications.warning('Server is shutting down — this page will stop responding.');
+            } catch (err) {
+                notifications.error('Shutdown failed: ' + err.message);
+            }
         });
 
         document.getElementById('qa-flush-stats').addEventListener('click', async () => {
